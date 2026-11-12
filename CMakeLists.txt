@@ -56,10 +56,7 @@ endif()
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.c
-          src/plugin/engine.c
-          src/plugin/platform-win.c
-          src/plugin/settings.c
+  PRIVATE src/plugin-main.c src/plugin/engine.c src/plugin/platform-win.c src/plugin/settings.c
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
