@@ -27,7 +27,7 @@ cmake --build --preset windows-x64 --config RelWithDebInfo
 cmake --install build_x64 --prefix release/RelWithDebInfo --config RelWithDebInfo
 ```
 
-The installed plugin lands in `release/RelWithDebInfo/data/obs-plugins/obs-replay-to-disk/` and `release/RelWithDebInfo/obs-plugins/64bit/`.
+The installed plugin lands in `release/RelWithDebInfo/obs-replay-to-disk/`: the DLL and PDB in `bin/64bit/`, locale files in `data/locale/`.
 
 ## License
 
