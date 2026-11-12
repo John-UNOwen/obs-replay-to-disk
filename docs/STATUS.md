@@ -160,3 +160,94 @@
     `rr_ledger_pin`, matching 5.6 step 5's "Pin them" on the worker side.
 - Open problems: none.
 
+## WP3 buffer engine: DONE
+- Date: 2026-11-12
+- Commits: bee74d7 423f3a1 ed88508 4554237 03183bc cc92737 (+ this status commit)
+- Acceptance (rig, `RR_SELFTEST=buffer`, window 30, runs in `.testrig/runs/wp3-r1|-r2|-r3`;
+  encoder auto-resolved to `obs_qsv11_v2`, rig fps 30/1):
+  - PASS: Log shows `buffer started`, `segment closed` about every 10 s, `pruned` starting
+    after ~55 s. wp3-r1 log `2026-11-12 14-04-16`: `buffer started: encoder=obs_qsv11_v2
+    fps=30/1 tracks=1 window=30s dir=...`; 11 `segment closed` lines with intervals
+    `10, 10.01, 9.98, 10.01, 10.01, 10.01, 9.99, 10, 10.01, 10` (first segment 11.45 s,
+    per E6); first `pruned:` line at +61.5 s after `buffer started` (D10: the first
+    segment ends +11.5 s, becomes prunable at +56.5 s, is pruned at the next boundary
+    +61.5 s — 30 s window + 15 s margin, as designed). Run 2 (`14-07-06`) identical:
+    first prune +61.5 s, 6 prunes, cadence ≤10.01 s.
+  - PASS: buffer folder never holds more than 6 `rrseg_*.mkv`. Run 2 polled every 2 s
+    from pwsh while OBS ran: `MAX_CONCURRENT_SEGMENTS=6 samples=62`
+    (`.testrig/runs/wp3-r1/poll-run2.txt`).
+  - PASS: `keep-me.txt` placed in the buffer folder before the runs (including the
+    purge-at-start and purge-at-stop runs) still exists afterwards; post-stop listing of
+    `wp3-r1\buffer` shows only `keep-me.txt` (15 B).
+  - PASS: after `buffer stopped`, no `rrseg_*.mkv` remain. Stop purge summary:
+    `engine: purged 3 segment file(s) on stop` then `buffer stopped` (wp3-r2 run 2, exit
+    while buffering); directory listing after exit: empty.
+  - PASS: kill OBS mid-run, restart: stale segments purged at next start. Killed the
+    saved-PID obs64 (93728) at ~40 s; `obs-ffmpeg-mux` PID 167276 was gone in the same
+    listing (E21 reconfirmed, mux never killed by us); 4 stale segments on disk. After
+    config rebuild and restart into the same `RR_SELFTEST_DIR`, the log shows four
+    `engine: purged: ...\rrseg_2026-11-12_14-09-*.mkv` lines at start and the dir holds
+    only new `rrseg_..._14-10-*.mkv` files.
+  - PASS: OBS closes within 5 s while the buffer runs, no crash, leaks line at 0 for
+    this plugin's objects. WM_CLOSE (EnumWindows on the owned PID) → `OBS_EXITED_CLEANLY`:
+    1.0 s (r1 run 1), 0.9 s (r1 run 2), 0.9 s (r2 run 2, closed while buffering: engine
+    logged `buffer stopped` via the EXIT handler before `plugin unloaded`), 1 s (r3).
+    Leaks control: r1 run 1 was the first session of a rebuilt fresh config and logged
+    `Number of memory leaks: 0`; every later session of a config logged 1, matching the
+    WP1 stock-OBS baseline (second-session leak, plugin adds 0). No crash sentinels or
+    exceptions; `plugin unloaded` every session.
+  - PASS: switching profile while buffering does not log "Tried to reset when already
+    active". Method: OBS 33 built-in obs-websocket 5.7.6 (`plugin_config/obs-websocket/
+    config.json` → `server_enabled=true`, `auth_required=false`), python `websockets`
+    client, request `SetCurrentProfile` (this build's name; `SwitchToProfile` and
+    `LoadProfile` return code 204) twice: Untitled → RigB → Untitled (rig profile
+    `basic/profiles/RigB`). Log grep for `Tried to reset when already active`: 0 hits.
+    Engine logged for each switch: `buffer stopped` at PROFILE_CHANGING, then
+    `engine: profile changed, autostarting the buffer` + `buffer started` (autostart was
+    set in `settings.json`, exercising the 5.8 load path end to end).
+  - PASS: zero-warning builds. `cmake --preset windows-x64 -DENABLE_TESTS=ON` +
+    `cmake --build --preset windows-x64 --config RelWithDebInfo`: 0 warnings, ctest
+    `core` passes. CI warning posture (`-DCMAKE_COMPILE_WARNING_AS_ERROR=ON` in a
+    throwaway dir, tests ON): all targets, 0 warnings, exit 0. Stricter `/W4 /WX` one-off
+    (`-DCMAKE_C_FLAGS="/W4 /WX"`): plugin TUs `plugin-main.c engine.c platform-win.c
+    settings.c` + `rr_core` all compile with 0 warnings; the libobs headers did NOT force
+    a /W3 downgrade — /W4 is clean as-is.
+  - PASS: clang-format 19.1.1 (`--dry-run --Werror` clean on all new/changed C files) and
+    gersemi 0.29.2 (`--check` clean on CMakeLists.txt).
+- Deviations from the handoff:
+  - OBS 33 frontend API has no `obs_frontend_get_recording_directory()` (reconfirmed: the
+    symbol is absent from obs.dll). The recording folder is resolved on the UI thread from
+    the profile config: `Output/RecFilePath`, else `SimpleOutput/FilePath`, else
+    `%USERPROFILE%\Videos`.
+  - `obs_data_merge` does not exist in OBS 33.0.1; `extra_encoder_settings` is merged
+    with `obs_data_apply(settings, extra)` (copies the extra JSON's items over the
+    defaults), before `keyint_sec=1` is set last (5.5).
+  - The `split_file` proc helper (8.2) lands with the WP4 save flow: WP3's `SAVE` is a
+    log-and-ignore stub by spec, so the proc would have no caller.
+  - Any `OUTPUT_STOPPED` that arrives while buffering without a stop request runs the 5.7
+    sequence (5.3 covers non-zero codes; a zero-code unexpected stop would otherwise hang
+    a dead output in BUFFERING). Error text comes from `obs_output_get_last_error` or
+    "the output stopped unexpectedly (code N)".
+  - The self-test watchdog is a plain worker thread (like WP1's worker) instead of a Qt
+    timer; it logs a `selftest: t=...s state=... total_frames=... lagged=N` line every
+    10 s using the OBS 33 getters (wp1-findings), then stops the buffer and logs
+    `selftest finished: <ok|failed> <reason>`.
+  - Extra (non-5.9) engine log lines: `engine: purged: %s` (stale purge at start, used
+    as R2 evidence), `engine: purged %d segment file(s) on stop`, start/stop ignore
+    notices. The exact 5.9 lines are unchanged.
+  - Rig-local: `ConfirmOnExit=false` in the test `user.ini` (WP1 deviation 7, needed for
+    unattended WM_CLOSE); the task's suggested `[WebSockets]` global.ini section is the
+    pre-OBS-28 layout — OBS 33 stores websocket settings in the obs-websocket
+    `config.json` shown above.
+- Open problems:
+  - `rr_settings_save()` has no in-app caller until WP5, so its write path itself has
+    not run in OBS; the file format/keys were exercised in R3 through the load path with
+    a hand-written `settings.json`.
+  - The self-test media source gets persisted as a global source in the rig's scene
+    collection at OBS exit, so a second run on the same config logs one cosmetic
+    `duplicate name "rr_selftest_media"` warning at load. Harmless for WP3 (R3 run was
+    such a session); WP5's hotkeys/dialog need to tolerate a reloaded global source.
+  - A pre-existing rig OBS instance (PID 112092, started 05:05 before this WP) was
+    present during the runs; it was left untouched (all launches/kills/closes targeted
+    only PIDs started by this WP).
+
