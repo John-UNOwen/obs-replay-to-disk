@@ -107,3 +107,56 @@
 - Open problems: none. U5 (HDR) intentionally untouched. NVENC/AMF variants of
   U2/U4 need an NVIDIA/AMD host; owner decides if/when.
 
+## WP2 pure-C core and tests: DONE
+- Date: 2026-11-12
+- Commits: 5e55bb7 (cherry-pick remux from wp1-spike) bf5d62c a66cf6e 151f0c4
+  bc04e75 659ee78 e8a1c69 707e8a3 7c18cfc (+ this status commit)
+- Acceptance:
+  - PASS: `cmake --preset windows-x64 -DENABLE_TESTS=ON`,
+    `cmake --build --preset windows-x64 --config RelWithDebInfo`, and
+    `ctest --test-dir build_x64 -C RelWithDebInfo` all succeed:
+    `1/1 Test #1: core ..... Passed 0.01 sec` /
+    `100% tests passed, 0 tests failed out of 1` (exit 0). The `core` test is
+    `tests/test_core.c`: one plain-`assert` executable with a tiny `RUN(test)`
+    macro, no framework, running all 18 required WP2 test functions; it prints
+    each test name and ends `all tests passed` (exit 0). Expected values are
+    hand-written (E6 10.83 s/59.94 fps, 11.7 s first segment, 300 KiB 1 s
+    segment, D10 boundary at ±1 ns, 6.75e9 B for 30 Mbps × 1800 s).
+    Assertions stay live under RelWithDebInfo (`#undef NDEBUG` before
+    `#include <assert.h>`); verified live: a temporary `assert(1+1==3)` aborted
+    the run (exit -1073740791 = 0xC0000409) instead of being optimized out.
+  - PASS: `rr_core` compiles with no warnings under the CI warning posture. The
+    CI preset `windows-ci-x64` pins the VS 2022 generator, which this host lacks
+    (WP0 deviation), so its posture (`/W3` from `compilerconfig` + `/WX` via
+    `CMAKE_COMPILE_WARNING_AS_ERROR`) was reproduced in a throwaway configure
+    dir kept out of the repo by the `build_*/` gitignore:
+    `cmake --preset windows-x64 -B build_check -DENABLE_TESTS=OFF -DCMAKE_COMPILE_WARNING_AS_ERROR=ON`
+    then `cmake --build build_check --config RelWithDebInfo --target rr_core`
+    → exit 0, zero warnings. A stricter second pass
+    (`-DCMAKE_C_FLAGS="/W4 /WX"`, MSVC's `-Wall` equivalent at level 4, warnings
+    fatal) also compiled all six `rr_core` TUs (five `core/` modules +
+    `save/remux.c` with its FFmpeg headers) with exit 0 and zero warnings.
+    The regular `ENABLE_TESTS=ON` plugin build likewise logged 0 compiler
+    warnings.
+  - PASS (WP2 step 4): the `-DRR_REMUX_MAIN` CLI builds as `rr-remux-cli` from
+    `src/save/remux.c` + FFmpeg. Smoke: joining run A's five WP1
+    `rrseg_*.mkv` gave `video_frames=1291 duration=21.516667 delay=2
+    grid_warnings=0 skipped_tail=0`, exit 0, 162 MB mp4. (Runtime needs the
+    obs-deps bin on PATH: `.deps/obs-deps-2026-10-23-x64/bin`, same DLLs OBS
+    ships.)
+- Deviations from the handoff:
+  - Settings clamp helper placement: `rr_settings_clamp_window_sec` (30–1800,
+    5.8) lives in `src/core/settings-clamp.c/.h` inside `rr_core`, so
+    `window_seconds_clamped_30_1800` needs no libobs; `plugin/settings.c` (WP3)
+    uses the same header. The four 5.10 interfaces are implemented verbatim.
+  - `src/save/remux.c` got one clang-format 19 whitespace commit (bf5d62c)
+    after the cherry-pick: the reference file has four continuation-line spots
+    that violate the repo's own `.clang-format`, and the CI format job checks
+    every file under `src/`. Format only, no text change.
+  - `.gitignore` whitelist gained `!/tests` — the template excludes everything
+    and did not yet allow the handoff 5.2 `tests/` directory.
+  - `rr_window_select` does not pin (5.10 passes the ledger as `const`):
+    selection returns `{first, count}` and WP3's save flow calls
+    `rr_ledger_pin`, matching 5.6 step 5's "Pin them" on the worker side.
+- Open problems: none.
+
