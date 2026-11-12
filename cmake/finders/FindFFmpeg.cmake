@@ -1,3 +1,6 @@
+# Vendored verbatim from obs-studio 33.0.1 (cmake/finders/FindFFmpeg.cmake, GPL-2.0-or-later).
+# The fences keep it byte-identical to upstream; gersemi's current version reformats it.
+# gersemi: off
 #[=======================================================================[.rst
 FindFFmpeg
 ----------
@@ -360,3 +363,4 @@ set_package_properties(
     URL "https://www.ffmpeg.org"
     DESCRIPTION "A complete, cross-platform solution to record, convert and stream audio and video."
 )
+# gersemi: on
