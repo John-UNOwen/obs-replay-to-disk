@@ -49,3 +49,61 @@
     `obs-plugins/64bit/`, but a plugin installed under `obs-plugins/64bit/` (handoff 7.1) loads
     fine, so the rig keeps the handoff layout.
 - Open problems: none.
+
+## WP1 spike inside real OBS: DONE
+- Date: 2026-11-12
+- Commits (branch `wp1-spike`, throwaway code, not merged to main): 9048308 3f25253
+  ffa3deb (+ this status/docs commit). Deliverables on main: docs only.
+- Full measurements and verdicts: `docs/wp1-findings.md`.
+- Acceptance:
+  - PASS U1: start and stop from the worker thread work, OBS exits cleanly.
+    Spike worker (`CreateThread`) creates encoders + both `ffmpeg_muxer` outputs,
+    starts them, and stops both from that thread. Every run: `selftest finished:
+    ok`, `plugin unloaded`, clean WM_CLOSE exit (`OBS_EXITED_CLEANLY`), no crash.
+    Evidence runs A2/B2/C/D logs.
+  - PASS U2: 0 dropped/lagged frames attributable to the plugin with OBS
+    recording at the same time (Intel QSV; NVENC/AMF untestable on this
+    Intel-only host). Run B2 (`obs_qsv11_v2` + `--startrecording`, 40.8 MB
+    recording): all 5 s UI-timer ticks and the final line
+    `lagged_frames=0 rr_dropped=0 ref_dropped=0`.
+  - PASS U3: DLL loads in OBS 33.0.1 and `rr_remux` runs in-process. Load line
+    `[obs-replay-to-disk] avformat 62.12.102` in every run; remux runs inside
+    obs64.exe with no child process, producing a verified `spike.mp4`.
+  - PASS: `verify_remux.py` prints OK for every stream, both modes, exit 0.
+    `--segments`: 5 segments, video+audio `continues`, no gaps. Replay vs
+    reference: `matched_in_order==packets`, `spread≈0.667 ms`,
+    `dts_monotonic=True`, `dts<=pts=True`, `alignments=1`, A/V offset −5.333 ms.
+  - PASS: `ffmpeg -f null` prints no warnings. `ffmpeg -v warning -i spike.mp4
+    -map 0 -f null -` was silent in every run.
+  - PASS U4: same passes on hardware encoders and HEVC. `obs_qsv11_v2` (H.264,
+    runs B/B2), `obs_qsv11_hevc` (run C, `spike.mp4` ffprobe tag `hevc,hvc1`),
+    `obs_qsv11_av1` (run D, `av01` Main). All verify-clean, `grid_warnings=0`.
+    NVENC/AMF untested (no such hardware on this host).
+  - PASS: Segment closure time recorded, well under 100 ms. `rr_file_closed`
+    (snippet 8.4) returned true on its first 20 ms poll for every segment of
+    every run (`after 0ms`); the check starts 7–60 ms after the boundary event.
+  - PASS (with note): OBS log tail. `plugin unloaded` in every run. No crash.
+    `Number of memory leaks: 1` in every plugin session, and also 1 in a
+    plugin-free second-launch control run with the DLL removed — stock OBS
+    33.0.1 leaks that 1 allocation from the second session of a config onward
+    (first-session controls show 0; WP0's `0` was a first session). Plugin
+    adds 0 on top of the rig baseline. Control matrix in `docs/wp1-findings.md`.
+- Deviations from the handoff:
+  - `obs_frontend_get_stats()` does not exist in OBS 33.0.1's frontend API, and
+    `video_output_get_skipped_frames()` is gone from libobs. Periodic
+    dropped/lagged logging uses a UI-thread QTimer shim calling
+    `obs_get_total_frames()` / `obs_get_lagged_frames()` /
+    `obs_output_get_frames_dropped()` (same data as the old
+    `numDroppedFrames`/`numLaggedFrames` fields).
+  - Encoder settings built from `obs_encoder_defaults(id)` per 5.5 rather than
+    the Linux reference's fresh `obs_data_t`; needed for valid Windows QSV
+    presets. Call order otherwise identical to the reference.
+  - `verify_remux.py --segments` globs `seg_*.mkv`, so D2 `rrseg_*` segments are
+    copied to a `verify/` dir as `seg_NNN.mkv` (chronological) for that check.
+  - QSV runs show `split_file→file_changed` latency of 798–877 ms, above the
+    handoff's 164–632 ms headless band but well inside the 3 s E5 budget.
+  - Added `rr_spike_wait_worker()` (bounded 20 s) in `obs_module_unload` so a
+    mid-spike OBS exit cannot unload the DLL while the worker thread runs.
+- Open problems: none. U5 (HDR) intentionally untouched. NVENC/AMF variants of
+  U2/U4 need an NVIDIA/AMD host; owner decides if/when.
+
