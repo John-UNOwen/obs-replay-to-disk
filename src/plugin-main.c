@@ -17,7 +17,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 /* Module entry: engine lifetime against the frontend events (D16/B8), the
- * 5.8 autostart, and the self-test hook (D18, handoff 7.2, mode `buffer`).
+ * 5.8 autostart, the global proc and saved signal (8.5), and the self-test
+ * hook (D18, handoff 7.2, modes `buffer` and `save`).
  * All UI-thread work (obs_frontend_*, folder resolution) happens here before
  * rr_engine_start; the worker never calls obs_frontend_*.
  */
@@ -54,10 +55,26 @@ static bool g_start_cfg_valid;
 
 static bool g_selftest; /* RR_SELFTEST is set */
 
-/* self-test watchdog thread (buffer mode) */
+/* self-test watchdog thread (buffer/save modes) */
 static HANDLE g_st_thread;
 static volatile LONG g_st_stop;
 static obs_source_t *g_st_media;
+
+/* save-mode save schedule (7.2 RR_SELFTEST_SAVES): seconds into the run at
+ * which the watchdog enqueues a SAVE. */
+#define RR_ST_MAX_SAVES 32
+static int g_st_save_sec[RR_ST_MAX_SAVES];
+static int g_st_save_count;
+static bool g_st_save_fired[RR_ST_MAX_SAVES];
+
+/* ------------------------------------------------ global proc and signal (8.5) */
+
+static void on_save_proc(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	UNUSED_PARAMETER(cd);
+	rr_engine_save(); /* queue only; the worker decides per 5.3 */
+}
 
 /* ------------------------------------------------- recording-path resolution */
 
@@ -148,8 +165,9 @@ static void selftest_detach_media(void)
 	g_st_media = NULL;
 }
 
-/* Watchdog: let the buffer run RR_SELFTEST_RUN seconds, then stop it, then
- * log "selftest finished" and keep OBS alive for the harness to close. */
+/* Watchdog: let the buffer run RR_SELFTEST_RUN seconds, firing any scheduled
+ * SAVE at its time (save mode, 7.2), then stop the buffer, then log
+ * "selftest finished" and keep OBS alive for the harness to close. */
 static DWORD WINAPI selftest_worker(LPVOID arg)
 {
 	const uint64_t run_ns = (uint64_t)(uintptr_t)arg * 1000000000ull;
@@ -160,13 +178,24 @@ static DWORD WINAPI selftest_worker(LPVOID arg)
 	bool ok = true;
 
 	while (!g_st_stop && (os_gettime_ns() - start) < run_ns) {
+		const double elapsed = (double)(os_gettime_ns() - start) / 1e9;
+
+		for (int i = 0; i < g_st_save_count; i++) {
+			if (!g_st_save_fired[i] && elapsed >= (double)g_st_save_sec[i]) {
+				g_st_save_fired[i] = true;
+				obs_log(LOG_INFO, "selftest: save trigger at t=%.0fs (scheduled %ds)", elapsed,
+					g_st_save_sec[i]);
+				rr_engine_save();
+			}
+		}
+
 		if (os_gettime_ns() >= next_stat) {
 			struct rr_status st;
 			rr_engine_get_status(&st);
 			obs_log(LOG_INFO,
 				"selftest: t=%.0fs state=%d buffered=%.1fs bytes=%lld total_frames=%u lagged=%u",
-				(double)(os_gettime_ns() - start) / 1e9, st.state, st.buffered_sec,
-				(long long)st.buffer_bytes, obs_get_total_frames(), obs_get_lagged_frames());
+				elapsed, st.state, st.buffered_sec, (long long)st.buffer_bytes, obs_get_total_frames(),
+				obs_get_lagged_frames());
 			next_stat += 10ull * 1000000000ull;
 		}
 		os_sleep_ms(100);
@@ -196,12 +225,28 @@ static DWORD WINAPI selftest_worker(LPVOID arg)
 	return 0;
 }
 
+/* RR_SELFTEST_SAVES: "20,60,72" — seconds into the run, saved into
+ * g_st_save_sec. Returns the count (watchdog thread fires them). */
+static int selftest_parse_saves(const char *list)
+{
+	int n = 0;
+	const char *p = list;
+	while (p && *p && n < RR_ST_MAX_SAVES) {
+		g_st_save_sec[n++] = atoi(p);
+		p = strchr(p, ',');
+		if (p)
+			p++;
+	}
+	return n;
+}
+
 /* Called on the UI thread at FINISHED_LOADING when RR_SELFTEST is set. */
 static void selftest_start(void)
 {
 	const char *mode = getenv("RR_SELFTEST");
-	if (!mode || strcmp(mode, "buffer") != 0) {
-		obs_log(LOG_WARNING, "selftest: RR_SELFTEST='%s' is not supported by this build (buffer only)",
+	const bool save_mode = mode && strcmp(mode, "save") == 0;
+	if (!mode || (strcmp(mode, "buffer") != 0 && !save_mode)) {
+		obs_log(LOG_WARNING, "selftest: RR_SELFTEST='%s' is not supported by this build (buffer/save only)",
 			mode ? mode : "");
 		return;
 	}
@@ -228,8 +273,32 @@ static void selftest_start(void)
 	if (enc && *enc)
 		snprintf(cfg.video_encoder, sizeof(cfg.video_encoder), "%s", enc);
 
-	obs_log(LOG_INFO, "selftest: buffer mode window=%ds run=%ds dir=%s media=%s", window, run_sec, dir,
-		media ? media : "(none)");
+	if (save_mode) {
+		const char *scope = getenv("RR_SELFTEST_SCOPE");
+		cfg.save_scope = (scope && strcmp(scope, "since_last_save") == 0) ? RR_SCOPE_SINCE_LAST_SAVE
+										  : RR_SCOPE_WINDOW;
+
+		/* Self-test-only overrides (WP4); production settings keep the
+		 * 5.8 defaults. RR_SELFTEST_TRACKS is the 5.8 bit mask (3 =
+		 * tracks 1+2), the bitrate keys are kbps. */
+		cfg.audio_tracks = env_int("RR_SELFTEST_TRACKS", 1);
+		cfg.audio_bitrate_kbps = env_int("RR_SELFTEST_AUDIO_BITRATE", 160);
+		cfg.bitrate_kbps = env_int("RR_SELFTEST_BITRATE", 30000);
+
+		const char *saves = getenv("RR_SELFTEST_SAVES");
+		if (saves && *saves)
+			g_st_save_count = selftest_parse_saves(saves);
+
+		if (env_int("RR_SELFTEST_REFERENCE", 0) == 1)
+			rr_engine_selftest_reference(cfg.output_dir); /* must precede rr_engine_start */
+
+		obs_log(LOG_INFO, "selftest: save mode window=%ds run=%ds scope=%s saves=%d tracks=%d reference=%d",
+			window, run_sec, cfg.save_scope == RR_SCOPE_SINCE_LAST_SAVE ? "since_last_save" : "window",
+			g_st_save_count, cfg.audio_tracks, env_int("RR_SELFTEST_REFERENCE", 0));
+	} else {
+		obs_log(LOG_INFO, "selftest: buffer mode window=%ds run=%ds dir=%s media=%s", window, run_sec, dir,
+			media ? media : "(none)");
+	}
 
 	g_start_cfg = cfg;
 	g_start_cfg_valid = true; /* a profile switch restarts into the self-test folders */
@@ -290,6 +359,17 @@ bool obs_module_load(void)
 
 	rr_settings_load(&g_settings);
 	rr_engine_init();
+
+	/* 8.5: the global save proc and the saved signal live on OBS's global
+	 * handlers. OBS 33 has no proc_handler_remove and no per-signal
+	 * removal (only signal_handler_remove_current inside a callback), so
+	 * they are added at load and stay registered until the process ends:
+	 * the module is only unloaded at OBS exit, and the proc callback just
+	 * enqueues (rr_engine_save is a no-op once the worker is gone). The
+	 * duplicate-signal log below covers a plugin reload in one session. */
+	proc_handler_add(obs_get_proc_handler(), "void rolling_replay_save()", on_save_proc, NULL);
+	if (!signal_handler_add(obs_get_signal_handler(), "void rolling_replay_saved(string path)"))
+		obs_log(LOG_WARNING, "signal rolling_replay_saved is already registered");
 
 	const char *mode = getenv("RR_SELFTEST");
 	g_selftest = (mode && *mode);
