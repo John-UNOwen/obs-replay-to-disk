@@ -315,8 +315,8 @@ int rr_remux(const struct rr_remux_params *p, struct rr_remux_result *res, char 
 				if (pkt->pts != AV_NOPTS_VALUE) {
 					if (first_pts[i] == AV_NOPTS_VALUE)
 						first_pts[i] = pkt->pts;
-					int64_t expect =
-						av_rescale_q(k * frame_size[i], av_make_q(1, sample_rate[i]), is->time_base);
+					int64_t expect = av_rescale_q(k * frame_size[i], av_make_q(1, sample_rate[i]),
+								      is->time_base);
 					if (llabs(expect - (pkt->pts - first_pts[i])) > 2)
 						res->grid_warnings++;
 				}
@@ -327,8 +327,10 @@ int rr_remux(const struct rr_remux_params *p, struct rr_remux_result *res, char 
 				res->audio_packets[i]++;
 			}
 
-			pkt->pts = av_rescale_q(opts, i == vidx ? frame_tb : av_make_q(1, sample_rate[i]), os->time_base);
-			pkt->dts = av_rescale_q(odts, i == vidx ? frame_tb : av_make_q(1, sample_rate[i]), os->time_base);
+			pkt->pts =
+				av_rescale_q(opts, i == vidx ? frame_tb : av_make_q(1, sample_rate[i]), os->time_base);
+			pkt->dts =
+				av_rescale_q(odts, i == vidx ? frame_tb : av_make_q(1, sample_rate[i]), os->time_base);
 			pkt->duration =
 				av_rescale_q(odur, i == vidx ? frame_tb : av_make_q(1, sample_rate[i]), os->time_base);
 			pkt->pos = -1;
