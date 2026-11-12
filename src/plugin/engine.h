@@ -14,8 +14,8 @@
 extern "C" {
 #endif
 
-/* States (handoff 5.3). SAVING is entered by the WP4 save flow only; in WP3
- * the SAVE command is logged and ignored. */
+/* States (handoff 5.3). SAVING is entered by the save flow (5.6) only; a
+ * SAVE accepted in any other state is logged and ignored (5.3). */
 enum rr_state {
 	RR_STATE_OFF = 0,
 	RR_STATE_STARTING,
@@ -39,6 +39,12 @@ void rr_engine_stop(void);
 void rr_engine_save(void);
 bool rr_engine_wait_off(uint32_t timeout_ms);     /* for PROFILE_CHANGING */
 void rr_engine_get_status(struct rr_status *out); /* copies a mutex-guarded snapshot */
+
+/* Self-test only (handoff 7.2 RR_SELFTEST_REFERENCE): the worker also records
+ * an unsplit reference.mkv on the same encoders into this output folder. Call
+ * before rr_engine_start; an empty string disables it. Not used in normal
+ * operation. */
+void rr_engine_selftest_reference(const char *out_dir);
 
 #ifdef __cplusplus
 }

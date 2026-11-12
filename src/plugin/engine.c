@@ -1,11 +1,11 @@
-/* engine.c — the buffer engine worker thread (handoff 5.3-5.5, 5.7, D5-D8,
- * D10-D12). One worker thread owns the output, the encoders and the ledger
- * (D5); every other thread (UI, encoder/signal threads) only pushes commands
- * into a mutex-guarded queue and signals os_event (D6). Times for segments
- * are captured inside the signal handlers (D7). "Segment closed" is an
- * exclusive-open test polled at 20 ms up to 2 s (D8).
- *
- * The WP4 save flow (5.6) slots into CMD_SAVE / the SAVING state.
+/* engine.c — the buffer engine worker thread (handoff 5.3-5.7, D5-D8,
+ * D10-D13). One worker thread owns the output, the encoders, the ledger and
+ * the save (D5); every other thread (UI, encoder/signal threads) only pushes
+ * commands into a mutex-guarded queue and signals os_event (D6). Times for
+ * segments are captured inside the signal handlers (D7). "Segment closed" is
+ * an exclusive-open test polled at 20 ms up to 2 s (D8). The save flow is 5.6:
+ * split_file, window selection with pins, rr_remux to <final>.rrpart, rename
+ * (D13), the rolling_replay_saved signal and the save sound.
  * License: GPL-2.0-or-later.
  */
 #include <obs-module.h>
@@ -27,6 +27,8 @@
 #include "core/ledger.h"
 #include "core/paths.h"
 #include "core/space.h"
+#include "core/window.h"
+#include "save/remux.h"
 
 #define RR_CMDQ_CAP 256
 #define RR_MAX_AUDIO 6
@@ -36,6 +38,10 @@
 
 #define SEGMENT_FORMAT "rrseg_%CCYY-%MM-%DD_%hh-%mm-%ss"
 #define SEGMENT_SPLIT_SEC 10 /* D2 */
+
+#define RR_MAX_SAVE_SEGS 512                /* > 1800 s / 10 s + headroom */
+#define RR_SAVE_FREE_MARGIN (256 << 20)     /* 5.6 step 6 */
+#define RR_SAVE_SPLIT_TIMEOUT_NS 3000000000ull /* 5.6 step 3: 3 s */
 
 /* ------------------------------------------------------- commands and queue */
 
@@ -73,6 +79,7 @@ static bool g_inited, g_shutdown_done;
 
 static struct {
 	obs_output_t *out;
+	obs_output_t *ref_out; /* self-test only: unsplit reference.mkv, same encoders (7.2) */
 	obs_encoder_t *venc;
 	obs_encoder_t *aenc[RR_MAX_AUDIO];
 	size_t aenc_count;
@@ -82,8 +89,11 @@ static struct {
 	char output_dir[RR_PATHLEN];
 	int fps_num, fps_den;
 
+	int state;           /* worker-owned mirror of the published state */
 	bool stop_requested; /* the stop sequence is waiting for OUTPUT_STOPPED */
 	bool stop_seen;      /* OUTPUT_STOPPED arrived */
+
+	uint64_t last_save_end_ns; /* end of the last successful save (scope since_last_save) */
 
 	char pending_del[RR_PENDING_DELETES][RR_PATHLEN]; /* failed prunes, retried on idle (5.4) */
 	size_t pending_del_count;
@@ -91,9 +101,20 @@ static struct {
 
 static char prune_paths[RR_PRUNE_MAX][RR_PATHLEN]; /* prune collects paths here (worker-only) */
 
+/* RR_SELFTEST_REFERENCE (7.2): full path of the unsplit reference output, or
+ * empty. Written on the UI thread before rr_engine_start, read by the worker. */
+static char g_ref_mkv[RR_PATHLEN];
+
+/* Save selection scratch (worker-only): copied paths so the ledger may shift
+ * while rr_remux runs, and the index range to unpin afterwards. */
+static char save_paths[RR_MAX_SAVE_SEGS][RR_PATHLEN];
+static const char *save_ptrs[RR_MAX_SAVE_SEGS];
+static int save_idx[RR_MAX_SAVE_SEGS];
+
 static void stop_session(bool force);
 static bool wait_output_stopped(unsigned long timeout_ms);
 static void handle_boundary(const char *path, uint64_t t_ns);
+static void handle_save(void);
 static void on_file_changed(void *data, calldata_t *cd);
 static void on_output_stopped(void *data, calldata_t *cd);
 
@@ -139,6 +160,8 @@ static bool dequeue_cmd(struct rr_cmd *cmd)
 
 static void publish_state(int state)
 {
+	s.state = state; /* worker-owned mirror */
+
 	EnterCriticalSection(&st_cs);
 	g_status.state = state;
 	if (state == RR_STATE_STARTING)
@@ -148,6 +171,24 @@ static void publish_state(int state)
 		g_status.buffer_bytes = 0;
 	}
 	LeaveCriticalSection(&st_cs);
+}
+
+static const char *state_name(int state)
+{
+	switch (state) {
+	case RR_STATE_OFF:
+		return "OFF";
+	case RR_STATE_STARTING:
+		return "STARTING";
+	case RR_STATE_BUFFERING:
+		return "BUFFERING";
+	case RR_STATE_SAVING:
+		return "SAVING";
+	case RR_STATE_STOPPING:
+		return "STOPPING";
+	default:
+		return "?";
+	}
 }
 
 static void publish_status_values(void)
@@ -389,6 +430,31 @@ static bool create_output_and_start(const struct rr_config *cfg, char *first_pat
 	signal_handler_connect(sh, "file_changed", on_file_changed, NULL);
 	signal_handler_connect(sh, "stop", on_output_stopped, NULL);
 
+	/* Self-test only (7.2 RR_SELFTEST_REFERENCE): an unsplit reference.mkv
+	 * on the same encoders, started before the split output so it holds
+	 * every packet the split output sees (as in the WP1 spike). */
+	if (g_ref_mkv[0]) {
+		obs_data_t *rs = obs_data_create();
+		obs_data_set_string(rs, "path", g_ref_mkv);
+		s.ref_out = obs_output_create("ffmpeg_muxer", "rr_reference", rs, NULL);
+		obs_data_release(rs);
+		if (!s.ref_out) {
+			obs_log(LOG_WARNING, "selftest: could not create the reference output");
+		} else {
+			obs_output_set_video_encoder(s.ref_out, s.venc);
+			for (size_t n = 0; n < s.aenc_count; n++)
+				obs_output_set_audio_encoder(s.ref_out, s.aenc[n], n);
+			if (!obs_output_start(s.ref_out)) {
+				obs_log(LOG_WARNING, "selftest: reference output start failed: %s",
+					obs_output_get_last_error(s.ref_out));
+				obs_output_release(s.ref_out);
+				s.ref_out = NULL;
+			} else {
+				obs_log(LOG_INFO, "selftest: reference output: %s", g_ref_mkv);
+			}
+		}
+	}
+
 	if (!obs_output_start(s.out)) {
 		obs_log(LOG_WARNING, "engine: output start failed: %s", obs_output_get_last_error(s.out));
 		return false;
@@ -398,6 +464,19 @@ static bool create_output_and_start(const struct rr_config *cfg, char *first_pat
 
 static void release_session_objects(void)
 {
+	if (s.ref_out) {
+		/* self-test reference output: graceful stop so the MKV is
+		 * finalized, bounded, then force as the last resort. */
+		if (obs_output_active(s.ref_out)) {
+			obs_output_stop(s.ref_out);
+			for (int i = 0; i < 250 && obs_output_active(s.ref_out); i++)
+				os_sleep_ms(20);
+			if (obs_output_active(s.ref_out))
+				obs_output_force_stop(s.ref_out);
+		}
+		obs_output_release(s.ref_out);
+		s.ref_out = NULL;
+	}
 	if (s.out) {
 		signal_handler_t *sh = obs_output_get_signal_handler(s.out);
 		signal_handler_disconnect(sh, "file_changed", on_file_changed, NULL);
@@ -501,6 +580,7 @@ static bool start_session(const struct rr_config *cfg_in)
 	s.cfg = cfg;
 	snprintf(s.buffer_dir, sizeof(s.buffer_dir), "%s", cfg.buffer_dir);
 	snprintf(s.output_dir, sizeof(s.output_dir), "%s", cfg.output_dir);
+	s.last_save_end_ns = 0; /* a new session has no previous save (5.6 step 4) */
 	s.ledger = rr_ledger_create(cfg.buffer_seconds);
 	if (!s.ledger) {
 		fail_start("out of memory");
@@ -648,7 +728,12 @@ static void remember_pending_delete(const char *path)
 static void prune(void)
 {
 	if (!s.ledger)
-		return; /* nothing buffered (a running save also pauses pruning: WP4) */
+		return;
+
+	/* Pruning pauses during a save (5.6); the pins (D10) stay the ledger's
+	 * own protection even outside the pause. */
+	if (s.state == RR_STATE_SAVING)
+		return;
 
 	int idx[RR_PRUNE_MAX];
 	const size_t n = rr_ledger_prunable(s.ledger, os_gettime_ns(), idx, RR_PRUNE_MAX);
@@ -761,6 +846,314 @@ static void handle_unexpected_stopped(int code)
 	stop_session(false);
 }
 
+/* ------------------------------------------------------- save flow (5.6) */
+
+static int save_cancel(void *ud)
+{
+	(void)ud;
+	return InterlockedCompareExchange(&g_quit, 0, 0) != 0; /* QUIT sets cancel (5.3) */
+}
+
+static size_t queue_count(void)
+{
+	EnterCriticalSection(&q_cs);
+	const size_t n = q_count;
+	LeaveCriticalSection(&q_cs);
+	return n;
+}
+
+static uint64_t last_closed_end(void)
+{
+	uint64_t end = 0;
+	const size_t n = rr_ledger_count(s.ledger);
+	for (size_t i = 0; i < n; i++) {
+		struct rr_segment_info seg;
+		if (!rr_ledger_get(s.ledger, i, &seg))
+			continue;
+		if (seg.closed && seg.end_ns > end)
+			end = seg.end_ns;
+	}
+	return end;
+}
+
+/* Commands that arrive while SAVING are resolved now, not by the main loop:
+ * a second SAVE is ignored with a log line (5.3, "accepted only in
+ * BUFFERING"); STOP stays queued and runs when the save ends (5.3); other
+ * commands go back to the queue tail in order. Call while state == SAVING. */
+static void sweep_save_queue(void)
+{
+	size_t n = queue_count();
+	for (size_t i = 0; i < n; i++) {
+		struct rr_cmd cmd;
+		if (!dequeue_cmd(&cmd))
+			break;
+		switch (cmd.type) {
+		case CMD_SAVE:
+			obs_log(LOG_INFO, "engine: SAVE ignored (saving)");
+			break;
+		case CMD_START:
+			obs_log(LOG_INFO, "engine: START ignored (saving)");
+			if (cmd.cfg)
+				free(cmd.cfg);
+			break;
+		case CMD_QUIT:
+			InterlockedExchange(&g_quit, 1);
+			break;
+		default: /* BOUNDARY / STOP / OUTPUT_STOPPED: back to the queue */
+			enqueue_cmd(&cmd);
+			break;
+		}
+	}
+}
+
+/* 5.6 step 3: keep reading the queue, handling BOUNDARYs normally, until one
+ * arrives with t >= t_req, or 3 s pass (then a warning; the caller continues
+ * with the closed segments). STOP is deferred to the queue tail (5.3). */
+static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
+{
+	const uint64_t deadline = t_req + RR_SAVE_SPLIT_TIMEOUT_NS;
+
+	for (;;) {
+		struct rr_cmd cmd;
+		if (dequeue_cmd(&cmd)) {
+			switch (cmd.type) {
+			case CMD_BOUNDARY:
+				handle_boundary(cmd.path, cmd.t_ns);
+				if (cmd.t_ns >= t_req) {
+					*window_end = cmd.t_ns;
+					return;
+				}
+				break;
+			case CMD_SAVE:
+				obs_log(LOG_INFO, "engine: SAVE ignored (saving)");
+				break;
+			case CMD_STOP:
+				enqueue_cmd(&cmd); /* queued: runs when the save ends */
+				break;
+			case CMD_START:
+				obs_log(LOG_INFO, "engine: START ignored (saving)");
+				if (cmd.cfg)
+					free(cmd.cfg);
+				break;
+			case CMD_QUIT:
+				InterlockedExchange(&g_quit, 1);
+				return;
+			case CMD_OUTPUT_STOPPED:
+				handle_unexpected_stopped(cmd.code); /* 5.3 */
+				*stopped = true;
+				return;
+			}
+		} else if (os_gettime_ns() >= deadline) {
+			obs_log(LOG_WARNING, "engine: save: no boundary within 3 s, continuing with closed segments");
+			return;
+		} else {
+			os_sleep_ms(10);
+		}
+	}
+}
+
+/* 5.6 step 7: final path from the filename format, with _2/_3/… suffixes
+ * while the plain name exists (D13's rename target). */
+static bool build_final_path(const char *out_dir, const char *fmt, char *final_path, size_t sz)
+{
+	char *fname = os_generate_formatted_filename("mp4", false, fmt);
+	if (!fname)
+		return false;
+	snprintf(final_path, sz, "%s\\%s", out_dir, fname);
+	bfree(fname);
+
+	struct stat st;
+	if (os_stat(final_path, &st) != 0)
+		return true;
+
+	char stem[RR_PATHLEN];
+	snprintf(stem, sizeof(stem), "%s", final_path);
+	char *dot = strrchr(stem, '.');
+	if (dot && strcmp(dot, ".mp4") == 0)
+		*dot = 0;
+	for (int n = 2; n < 1000; n++) {
+		char cand[RR_PATHLEN + 8];
+		snprintf(cand, sizeof(cand), "%s_%d.mp4", stem, n);
+		if (os_stat(cand, &st) != 0) {
+			snprintf(final_path, sz, "%s", cand);
+			return true;
+		}
+	}
+	return false;
+}
+
+static void handle_save(void)
+{
+	if (s.state != RR_STATE_BUFFERING) {
+		obs_log(LOG_INFO, "engine: SAVE ignored (state %s)", state_name(s.state));
+		return;
+	}
+	if (!s.out || !s.ledger) {
+		obs_log(LOG_INFO, "engine: SAVE ignored (buffer not running)");
+		return;
+	}
+	if (InterlockedCompareExchange(&g_quit, 0, 0) != 0) {
+		obs_log(LOG_INFO, "engine: SAVE ignored (shutting down)");
+		return;
+	}
+
+	/* 5.6 step 1 */
+	const uint64_t t_req = os_gettime_ns();
+	publish_state(RR_STATE_SAVING);
+
+	/* Step 2: force a split at the next keyframe (snippet 8.2) */
+	calldata_t cd = {0};
+	const bool proc_ok = proc_handler_call(obs_output_get_proc_handler(s.out), "split_file", &cd);
+	const bool split_enabled = calldata_bool(&cd, "split_file_enabled");
+	calldata_free(&cd);
+	if (!proc_ok || !split_enabled)
+		obs_log(LOG_WARNING, "engine: save: the split_file proc did not take effect (ok=%d enabled=%d)",
+			(int)proc_ok, (int)split_enabled);
+
+	/* Step 3: boundaries until t >= t_req or 3 s */
+	uint64_t window_end = 0;
+	bool stopped = false;
+	save_drain(t_req, &window_end, &stopped);
+	if (stopped)
+		return; /* the stop sequence ran; the save is done (state OFF) */
+
+	if (window_end == 0)
+		window_end = last_closed_end(); /* timeout path (5.6 step 4) */
+
+	int sel_count = 0;
+	bool pinned = false;
+	bool ok = false;
+	bool counted_fail = false; /* "save failed:" already logged */
+	char rerr[256] = "";
+	struct rr_remux_result res = {0};
+	char final_path[RR_PATHLEN] = "";
+
+	/* Steps 4-5: window, selection, pins */
+	if (window_end == 0) {
+		counted_fail = true;
+		rerr[0] = 0;
+	} else {
+		const uint64_t lse = s.cfg.save_scope == RR_SCOPE_SINCE_LAST_SAVE ? s.last_save_end_ns : 0;
+		struct rr_window w;
+		if (!rr_window_select(s.ledger, window_end, s.cfg.buffer_seconds, lse, &w)) {
+			counted_fail = true;
+			rerr[0] = 0;
+		} else if (w.count > RR_MAX_SAVE_SEGS) {
+			snprintf(rerr, sizeof(rerr), "%d segments exceed the save limit of %d", w.count,
+				 RR_MAX_SAVE_SEGS);
+		} else {
+			int64_t total_bytes = 0;
+			bool vanished = false;
+			for (int i = 0; i < w.count; i++) {
+				save_idx[i] = w.first + i;
+				struct rr_segment_info si;
+				if (!rr_ledger_get(s.ledger, (size_t)save_idx[i], &si) || !si.path) {
+					vanished = true;
+					break;
+				}
+				snprintf(save_paths[i], RR_PATHLEN, "%s", si.path);
+				save_ptrs[i] = save_paths[i];
+				if (si.bytes > 0)
+					total_bytes += si.bytes;
+			}
+			if (vanished) {
+				snprintf(rerr, sizeof(rerr), "a selected segment vanished from the ledger");
+			} else {
+				rr_ledger_pin(s.ledger, save_idx, (size_t)w.count);
+				pinned = true;
+				sel_count = w.count;
+
+				obs_log(LOG_INFO, "save started: segments=%d inpoint=%.2fs", w.count, w.inpoint_sec);
+
+				/* Step 6: output drive room for the new file */
+				const uint64_t need = (uint64_t)total_bytes + RR_SAVE_FREE_MARGIN;
+				if (os_get_free_disk_space(s.output_dir) < need) {
+					snprintf(rerr, sizeof(rerr), "the output drive lacks room for %lld MB",
+						 (long long)(need / (1024 * 1024)));
+				} else if (!build_final_path(s.output_dir, s.cfg.filename_format, final_path,
+							     sizeof(final_path))) {
+					snprintf(rerr, sizeof(rerr), "could not build an output file name");
+				} else {
+					/* Step 7: rr_remux to <final>.rrpart (D13);
+					 * cancel returns the quit flag (5.3). */
+					char part_path[RR_PATHLEN + 16];
+					snprintf(part_path, sizeof(part_path), "%s.rrpart", final_path);
+
+					struct rr_remux_params p = {0};
+					p.segments = save_ptrs;
+					p.num_segments = w.count;
+					p.out_path = part_path;
+					p.fps_num = s.fps_num;
+					p.fps_den = s.fps_den;
+					p.inpoint_sec = w.inpoint_sec;
+					p.cancel = save_cancel;
+
+					const uint64_t t0 = os_gettime_ns();
+					const int rr_ret = rr_remux(&p, &res, rerr, sizeof(rerr));
+					const double took_s = (double)(os_gettime_ns() - t0) / 1e9;
+
+					ok = (rr_ret == 0);
+					if (ok && os_rename(part_path, final_path) != 0) {
+						ok = false;
+						snprintf(rerr, sizeof(rerr), "could not rename the part file");
+					}
+
+					if (ok) {
+						/* Step 8: success bookkeeping */
+						s.last_save_end_ns = window_end;
+
+						EnterCriticalSection(&st_cs);
+						snprintf(g_status.last_saved, sizeof(g_status.last_saved), "%s",
+							 final_path);
+						LeaveCriticalSection(&st_cs);
+
+						calldata_t scd = {0}; /* 8.5 */
+						calldata_set_string(&scd, "path", final_path);
+						signal_handler_signal(obs_get_signal_handler(), "rolling_replay_saved",
+								      &scd);
+						calldata_free(&scd);
+
+						if (s.cfg.save_sound)
+							rr_play_save_sound(true);
+
+						obs_log(LOG_INFO,
+							"save finished: %s frames=%lld duration=%.2fs took=%.2fs warnings=%d",
+							final_path, (long long)res.video_frames, res.duration_sec,
+							took_s, res.grid_warnings);
+						if (res.grid_warnings > 0)
+							obs_log(LOG_WARNING,
+								"engine: save: %d packet(s) were off the frame grid",
+								res.grid_warnings);
+						if (res.skipped_tail)
+							obs_log(LOG_WARNING,
+								"engine: save: the unreadable last segment was skipped");
+					} else {
+						os_unlink(part_path); /* D13: the caller deletes the part */
+						if (s.cfg.save_sound)
+							rr_play_save_sound(false);
+					}
+				}
+			}
+		}
+	}
+
+	/* Step 9 */
+	if (pinned)
+		rr_ledger_unpin(s.ledger, save_idx, (size_t)sel_count);
+	publish_state(RR_STATE_BUFFERING);
+	sweep_save_queue(); /* saves enqueued while SAVING are ignored now (5.3) */
+	prune();            /* resumes pruning; the backlog from the pause goes now */
+
+	if (!ok) {
+		if (counted_fail) {
+			obs_log(LOG_INFO, "nothing to save");
+		} else {
+			obs_log(LOG_INFO, "save failed: %s", rerr);
+			set_error(rerr);
+		}
+	}
+}
+
 /* ------------------------------------------------------- idle tasks (5.4) */
 
 static void idle_tasks(void)
@@ -831,9 +1224,7 @@ static DWORD WINAPI worker_main(LPVOID unused)
 					obs_log(LOG_INFO, "engine: STOP ignored (buffer not running)");
 				break;
 			case CMD_SAVE:
-				/* WP4 replaces this with the 5.6 flow (state SAVING,
-				 * split_file, rr_window_select, rr_remux). */
-				obs_log(LOG_INFO, "engine: SAVE ignored (the save flow lands in WP4)");
+				handle_save();
 				break;
 			case CMD_QUIT:
 				InterlockedExchange(&g_quit, 1);
@@ -940,6 +1331,14 @@ void rr_engine_save(void)
 	struct rr_cmd cmd = {0};
 	cmd.type = CMD_SAVE;
 	enqueue_cmd(&cmd);
+}
+
+void rr_engine_selftest_reference(const char *out_dir)
+{
+	if (out_dir && *out_dir)
+		snprintf(g_ref_mkv, sizeof(g_ref_mkv), "%s\\reference.mkv", out_dir);
+	else
+		g_ref_mkv[0] = 0;
 }
 
 bool rr_engine_wait_off(uint32_t timeout_ms)
