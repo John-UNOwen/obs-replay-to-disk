@@ -64,4 +64,10 @@ if(ENABLE_TESTS)
   add_executable(test_core tests/test_core.c)
   target_link_libraries(test_core PRIVATE rr_core)
   add_test(NAME core COMMAND test_core)
+
+  # The rr_remux CLI (same code as the plugin's save step) so the remux path can
+  # be exercised outside OBS.
+  add_executable(rr-remux-cli src/save/remux.c)
+  target_compile_definitions(rr-remux-cli PRIVATE RR_REMUX_MAIN)
+  target_link_libraries(rr-remux-cli PRIVATE FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil)
 endif()
