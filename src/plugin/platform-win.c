@@ -23,12 +23,22 @@ bool rr_file_closed(const char *utf8_path)
 	return true;
 }
 
+void rr_play_save_sound(bool success)
+{
+	MessageBeep(success ? MB_OK : MB_ICONERROR);
+}
+
 #else /* !_WIN32 */
 
 bool rr_file_closed(const char *utf8_path)
 {
 	(void)utf8_path; /* no mandatory file locks to test on this platform */
 	return true;
+}
+
+void rr_play_save_sound(bool success)
+{
+	(void)success; /* no MessageBeep on this platform */
 }
 
 #endif
