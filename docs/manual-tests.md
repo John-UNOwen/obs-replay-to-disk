@@ -37,6 +37,8 @@ Install the plugin first (see the README). Work down the list and check a box wh
   How-to: save a full 30-minute window while something with obvious sync cues (a talking face, a metronome) plays. Watch the first minute and the last minute of the clip. A constant audio offset of a few ms up to about 40 ms is known and acceptable; it must not grow through the clip.
 - [ ] With the plugin removed, OBS behaves as stock.
   How-to: close OBS, delete `%ProgramData%\obs-studio\plugins\obs-replay-to-disk`, start OBS. No Tools menu item, no hotkeys, no dock, and recording, streaming and the built-in Replay Buffer all behave normally.
+- [ ] OBS cannot change its Video settings while the buffer runs (a known limitation, not a bug).
+  How-to: OBS grays out the Video page when you open Settings during buffering, so set the change up first: open Settings, go to the Video page, then start the buffer with the hotkey, change the Base (Canvas) Resolution, and click Apply. OBS stays at the old resolution: the OBS log gets a `Tried to reset when already active` line plus the plugin's `while the buffer runs OBS cannot change its Video settings` warning, and the new value only takes effect at the next OBS start. Close Settings, click Stop Buffer, apply the same change again: it lands immediately this time. The AutoConfig Wizard behaves the same while the buffer runs (it finishes, OBS keeps the old resolution), and Scene Collection > Remigrate Scene Collection refuses with a "Reset not possible" box. Switching profiles is fine: the plugin stops and restarts the buffer around the switch.
 
 ## Dialog, dock and hotkeys (WP5)
 

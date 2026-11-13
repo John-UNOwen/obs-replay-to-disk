@@ -660,6 +660,12 @@ static bool start_session(const struct rr_config *cfg_in)
 	publish_state(RR_STATE_BUFFERING);
 	obs_log(LOG_INFO, "buffer started: encoder=%s fps=%d/%d tracks=%d window=%ds dir=%s", used_enc, s.fps_num,
 		s.fps_den, rr_config_track_count(&cfg), cfg.buffer_seconds, s.buffer_dir);
+	/* OBS emits no frontend event around its own video resets (Settings >
+	 * Video Apply, the AutoConfig wizard, scene-collection remigrate), so
+	 * the engine cannot step aside for them: keep the rule visible in the
+	 * log (documented known limit). */
+	obs_log(LOG_WARNING, "engine: while the buffer runs OBS cannot change its Video settings "
+			     "(Settings > Video, AutoConfig, scene-collection remigrate): stop the buffer first");
 	return true;
 }
 
@@ -1216,6 +1222,10 @@ static void handle_save(void)
 				sel_count = w.count;
 
 				obs_log(LOG_INFO, "save started: segments=%d inpoint=%.2fs", w.count, w.inpoint_sec);
+				obs_log(LOG_WARNING,
+					"engine: while the buffer runs OBS cannot change its Video settings "
+					"(Settings > Video, AutoConfig, scene-collection remigrate): stop the buffer "
+					"first");
 
 				/* Step 6: output drive room for the new file */
 				const uint64_t need = (uint64_t)total_bytes + RR_SAVE_FREE_MARGIN;

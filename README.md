@@ -50,7 +50,7 @@ With constant quality, the disk-space estimate in the dialog assumes about 50 Mb
 
 ## Side effects
 
-- OBS locks its settings while the buffer runs. OBS disables the Video page and most of the Output page whenever any video output is active, the same lock a running recording causes. Stop the buffer to change those settings.
+- The buffer keeps OBS's video output busy, so OBS grays out the Video page when you open its Settings during buffering, the same lock a running recording causes. That gray-out is only applied when the page opens, and the AutoConfig Wizard and the scene-collection remigrate do not check it at all, so some changes can still reach OBS while the buffer runs; see the matching entry under Known limits.
 - If you record or stream at the same time, the GPU or CPU encodes twice.
 - A saved clip can start up to 1 s early, because cuts land on keyframes.
 - A saved clip has a constant audio/video offset of a few milliseconds up to about 40 ms. It does not grow over time.
@@ -70,6 +70,7 @@ A full save reads and writes the whole buffer once. In rig tests a full-window s
 - Only Quick Sync (Intel) has been machine-tested for the encoder path. NVENC and AMD AMF are supported in the settings and follow the same code path, but are untested; see [docs/manual-tests.md](docs/manual-tests.md).
 - HDR is best-effort and untested.
 - A/V sync, long saves, low-disk behavior and player compatibility still need a human run through [docs/manual-tests.md](docs/manual-tests.md). Everything that was checked on the development rig is recorded in [docs/STATUS.md](docs/STATUS.md).
+- OBS cannot change its video settings while the buffer runs. The video reset OBS needs fails against the buffer, and OBS gives up quietly: it keeps running at the old resolution and frame rate while storing the new values for the next start, and the log gets a "Tried to reset when already active" line. A change can land during buffering through a Settings window opened before the buffer started, the Advanced tab, the AutoConfig Wizard, or a scene-collection remigrate (the remigrate refuses with a "Reset not possible" box). Stop the buffer, change the setting, then start the buffer again. Switching profiles is handled: the plugin stops the buffer before the switch and restarts it after.
 
 ## Building
 
