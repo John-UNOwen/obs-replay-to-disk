@@ -14,7 +14,9 @@ extern "C" {
 enum rr_path_error { RR_PATH_OK, RR_PATH_EMPTY, RR_PATH_DRIVE_ROOT, RR_PATH_SAME_AS_OUTPUT, RR_PATH_NOT_ABSOLUTE };
 
 /* A buffer folder may not be empty, a drive root (C:\, D:/), the same folder
- * as the output folder (case-insensitive, either slash), or relative. */
+ * as the output folder (case-insensitive, either slash), or relative. Both
+ * paths are canonicalized first ('.', '..' and repeated separators folded), so
+ * "C:\rec\..\rec" cannot pass as a folder other than "C:\rec". */
 enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char *output_dir);
 
 bool rr_paths_is_segment_name(const char *file_name); /* "rrseg_*.mkv" only */

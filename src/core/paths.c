@@ -68,18 +68,127 @@ static bool paths_equal_ci(const char *a, const char *b)
 	return true;
 }
 
+enum { RR_PATH_CANON_MAX = 4096 };
+
+/* Canonical spelling for comparison: one separator style per root kind, empty
+ * and "." segments dropped, ".." pops a segment and clamps at the root
+ * (Windows: "cd .." on "C:\" stays on "C:\", out of "\\server\share" stays in
+ * the share). Keeps the root spelling: "C:\", "\\server\share", "/". Purely
+ * textual — like GetFullPathNameW, no short-name or case resolution, and no
+ * CWD substitution for relative paths. Returns false for relative, over-long
+ * or degenerate input; the caller then compares the raw text as before. */
+static bool paths_canonicalize(char *out, size_t out_size, const char *in)
+{
+#define RR_MAX_SEGS 1024
+	const char *seg[RR_MAX_SEGS];
+	size_t seg_len[RR_MAX_SEGS];
+	size_t nseg = 0, nprot = 0;
+	const char *p = in;
+	char sep = '\\';
+	bool unc = false, drive = false;
+
+	if (is_sep(p[0]) && is_sep(p[1])) {
+		unc = true;
+		p += 2;
+	} else if (is_sep(p[0])) {
+		sep = '/';
+		p += 1;
+	} else if (path_is_absolute(p)) {
+		drive = true;
+		p += 3; /* path_is_absolute() guarantees "C:\" */
+	} else {
+		return false;
+	}
+
+	while (*p) {
+		while (is_sep(*p))
+			p++;
+		const char *start = p;
+		while (*p && !is_sep(*p))
+			p++;
+		const size_t len = (size_t)(p - start);
+
+		if (len == 0)
+			continue;
+		const bool dot = len == 1 && start[0] == '.';
+		const bool dotdot = len == 2 && start[0] == '.' && start[1] == '.';
+		if (dot || dotdot) {
+			if (unc && nseg < 2)
+				return false; /* "." or ".." where server\share belongs */
+			if (dotdot && nseg > nprot)
+				nseg--;
+			continue;
+		}
+		if (nseg == RR_MAX_SEGS)
+			return false;
+		seg[nseg] = start;
+		seg_len[nseg] = len;
+		nseg++;
+		if (unc && nseg == 2)
+			nprot = 2; /* ".." may not climb out of "\\server\share" */
+	}
+	if (unc && nseg < 2)
+		return false;
+
+	size_t w = 0;
+	if (drive) {
+		if (out_size < 4)
+			return false;
+		out[w++] = in[0];
+		out[w++] = ':';
+		out[w++] = '\\';
+	} else if (unc) {
+		if (out_size < 3)
+			return false;
+		out[w++] = '\\';
+		out[w++] = '\\';
+	} else {
+		if (out_size < 2)
+			return false;
+		out[w++] = '/';
+	}
+	for (size_t i = 0; i < nseg; i++) {
+		if (i > 0) {
+			if (w + 1 >= out_size)
+				return false;
+			out[w++] = sep;
+		}
+		if (w + seg_len[i] >= out_size)
+			return false;
+		memcpy(out + w, seg[i], seg_len[i]);
+		w += seg_len[i];
+	}
+	out[w] = 0;
+	return true;
+#undef RR_MAX_SEGS
+}
+
 enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char *output_dir)
 {
+	char buf_canon[RR_PATH_CANON_MAX], out_canon[RR_PATH_CANON_MAX];
+
 	if (!buffer_dir || !buffer_dir[0])
 		return RR_PATH_EMPTY;
 	if (!path_is_absolute(buffer_dir))
 		return RR_PATH_NOT_ABSOLUTE;
-	if (path_is_drive_root(buffer_dir))
+
+	/* Compare canonical spellings so "C:\rec\..\rec" cannot hide the output
+	 * folder — or itself hide a drive root — from the checks below. */
+	const char *buf = buf_canon;
+	if (!paths_canonicalize(buf_canon, sizeof(buf_canon), buffer_dir))
+		buf = buffer_dir;
+	if (path_is_drive_root(buf))
 		return RR_PATH_DRIVE_ROOT;
+
 	/* An empty output_dir means "OBS's recording path", resolved by the caller;
 	 * it cannot be compared here. */
-	if (output_dir && output_dir[0] && paths_equal_ci(buffer_dir, output_dir))
-		return RR_PATH_SAME_AS_OUTPUT;
+	if (output_dir && output_dir[0]) {
+		const char *out = out_canon;
+		if (!paths_canonicalize(out_canon, sizeof(out_canon), output_dir))
+			out = output_dir;
+		if (paths_equal_ci(buf, out))
+			return RR_PATH_SAME_AS_OUTPUT;
+	}
 	return RR_PATH_OK;
 }
 

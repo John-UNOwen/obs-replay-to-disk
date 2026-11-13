@@ -493,6 +493,33 @@ static void buffer_dir_equal_to_output_dir_is_refused(void)
 	assert(rr_paths_check_buffer_dir("C:\\", "") == RR_PATH_DRIVE_ROOT);
 }
 
+static void buffer_dir_dot_segments_are_folded(void)
+{
+	/* A spelling that resolves to the output folder is refused, whatever
+	 * '.', '..' or slash style it hides behind. */
+	assert(rr_paths_check_buffer_dir("C:\\rec\\..\\rec", "C:\\rec") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("C:/rec/../rec", "C:\\rec\\") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("C:\\rec\\.", "C:\\rec") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("C:\\rec\\sub\\..", "C:\\rec") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("C:\\rec\\..\\..\\rec", "C:\\rec") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("C:\\\\rec\\\\x\\\\..\\\\y", "C:\\rec\\y") == RR_PATH_SAME_AS_OUTPUT);
+
+	/* '..' clamps at the root: that is a drive root, not a hidden folder. */
+	assert(rr_paths_check_buffer_dir("C:\\rec\\..", "C:\\out") == RR_PATH_DRIVE_ROOT);
+
+	/* Different folders after folding stay OK. */
+	assert(rr_paths_check_buffer_dir("C:\\rec\\..\\other", "C:\\rec") == RR_PATH_OK);
+	assert(rr_paths_check_buffer_dir("D:\\a\\b\\..\\c", "D:\\a\\b") == RR_PATH_OK);
+
+	/* UNC spellings fold too; '..' cannot climb out of the share. */
+	assert(rr_paths_check_buffer_dir("\\\\server\\share\\a\\..\\b", "\\\\server\\share\\b") ==
+	       RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("\\\\server\\share\\..\\b", "\\\\server\\share\\b") == RR_PATH_SAME_AS_OUTPUT);
+
+	/* Degenerate spellings fall back to the raw comparison (today's rule). */
+	assert(rr_paths_check_buffer_dir("\\\\server", "C:\\out") == RR_PATH_OK);
+}
+
 static void segment_name_pattern(void)
 {
 	assert(rr_paths_is_segment_name("rrseg_x.mkv"));
@@ -569,6 +596,7 @@ int main(void)
 	RUN(space_estimate_and_preflight);
 	RUN(buffer_dir_drive_root_is_refused);
 	RUN(buffer_dir_equal_to_output_dir_is_refused);
+	RUN(buffer_dir_dot_segments_are_folded);
 	RUN(segment_name_pattern);
 	RUN(save_filename_must_be_bare);
 	RUN(window_seconds_clamped_30_1800);
