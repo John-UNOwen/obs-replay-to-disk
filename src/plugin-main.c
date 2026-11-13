@@ -400,10 +400,17 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 		break;
 
 	case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
-		/* B8/D16: a profile switch resets video; no output may be active. */
-		rr_engine_stop();
-		if (!rr_engine_wait_off(6000))
-			obs_log(LOG_WARNING, "engine: the buffer did not reach OFF within 6 s before a profile change");
+		/* B8/D16: a profile switch resets video, and libobs only does
+		 * that while no raw-video consumer is active — ours are
+		 * released when the buffer reaches OFF. The engine escalates
+		 * (stop, save cancel, force stop) within a bounded time; the
+		 * old fixed 6 s let a save outlast it and OBS then silently
+		 * kept the old video mode ("Tried to reset when already
+		 * active"). */
+		if (!rr_engine_halt_for_video_reset())
+			obs_log(LOG_WARNING,
+				"engine: the buffer did not reach OFF before a profile change: OBS may keep the "
+				"current video settings for the new profile");
 		break;
 
 	case OBS_FRONTEND_EVENT_PROFILE_CHANGED:

@@ -44,6 +44,16 @@
 #define RR_SAVE_SPLIT_TIMEOUT_NS 3000000000ull /* 5.6 step 3: 3 s */
 #define RR_SAVE_DEFER_CAP 32                /* STOPs parked while draining (5.3) */
 
+/* B8/D16: the bounded phases of the halt before a video reset (a profile
+ * switch, rr_engine_halt_for_video_reset). Phase 1 is a normal stop (up to
+ * 5 s graceful + 2 s force in stop_session); a save defers STOP by design
+ * (5.3) and can outlast any wait, so phase 2 cancels it (rr_remux polls the
+ * cancel flag once per segment, so the abort is bounded by one segment) and
+ * waits longer; phase 3 forces the stop on the worker. */
+#define RR_RESET_STOP_WAIT_MS 6000u
+#define RR_RESET_CANCEL_WAIT_MS 12000u
+#define RR_RESET_FORCE_WAIT_MS 15000u
+
 /* ------------------------------------------------------- commands and queue */
 
 enum rr_cmd_type {
@@ -53,6 +63,7 @@ enum rr_cmd_type {
 	CMD_QUIT,
 	CMD_BOUNDARY,       /* from file_changed (D6/D7) */
 	CMD_OUTPUT_STOPPED, /* from the stop signal */
+	CMD_FORCE_STOP,     /* a video reset forces the stop (B8/D16) */
 };
 
 struct rr_cmd {
@@ -73,7 +84,8 @@ static CRITICAL_SECTION st_cs;
 static struct rr_status g_status; /* the mutex-guarded snapshot (5.10) */
 
 static HANDLE g_thread;
-static volatile LONG g_quit; /* QUIT requested (atomic) */
+static volatile LONG g_quit;        /* QUIT requested (atomic) */
+static volatile LONG g_save_cancel; /* a video reset cancels the running save (B8/D16) */
 static bool g_inited, g_shutdown_done;
 
 /* ------------------------------------------------------ worker-only state */
@@ -518,6 +530,7 @@ static bool start_session(const struct rr_config *cfg_in)
 	struct rr_config cfg = *cfg_in;
 	rr_settings_clamp(&cfg);
 
+	InterlockedExchange(&g_save_cancel, 0); /* a new session starts un-cancelled (B8/D16) */
 	publish_state(RR_STATE_STARTING);
 
 	char first_path[RR_PATHLEN] = "";
@@ -708,6 +721,12 @@ static bool wait_output_stopped(unsigned long timeout_ms)
 				if (cmd.cfg)
 					free(cmd.cfg);
 				break;
+			case CMD_FORCE_STOP:
+				/* Already stopping: a video reset wants it done
+				 * now, so skip what is left of the graceful wait. */
+				if (s.out)
+					obs_output_force_stop(s.out);
+				break;
 			default:
 				break; /* STOP/SAVE: already stopping */
 			}
@@ -864,7 +883,9 @@ static void handle_unexpected_stopped(int code)
 static int save_cancel(void *ud)
 {
 	(void)ud;
-	return InterlockedCompareExchange(&g_quit, 0, 0) != 0; /* QUIT sets cancel (5.3) */
+	/* QUIT cancels (5.3); so does a video reset (B8/D16) without quitting:
+	 * the halt sets the flag, rr_remux checks it per segment. */
+	return InterlockedCompareExchange(&g_quit, 0, 0) != 0 || InterlockedCompareExchange(&g_save_cancel, 0, 0) != 0;
 }
 
 static size_t queue_count(void)
@@ -912,7 +933,7 @@ static void sweep_save_queue(void)
 		case CMD_QUIT:
 			InterlockedExchange(&g_quit, 1);
 			break;
-		default: /* BOUNDARY / STOP / OUTPUT_STOPPED: back to the queue */
+		default: /* BOUNDARY / STOP / FORCE_STOP / OUTPUT_STOPPED: back to the queue */
 			enqueue_cmd(&cmd);
 			break;
 		}
@@ -949,6 +970,7 @@ static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
 				obs_log(LOG_INFO, "engine: SAVE ignored (saving)");
 				break;
 			case CMD_STOP:
+			case CMD_FORCE_STOP:
 				/* Parked: runs when the save ends. A STOP past the
 				 * parking capacity is redundant (one stop is enough). */
 				if (deferred_count < RR_SAVE_DEFER_CAP)
@@ -1183,6 +1205,8 @@ static void handle_save(void)
 		if (counted_fail) {
 			obs_log(LOG_INFO, "nothing to save");
 		} else {
+			if (InterlockedCompareExchange(&g_save_cancel, 0, 0) != 0)
+				obs_log(LOG_INFO, "engine: save cancelled (a video reset asked for it)");
 			obs_log(LOG_INFO, "save failed: %s", rerr);
 			set_error(rerr);
 		}
@@ -1257,6 +1281,12 @@ static DWORD WINAPI worker_main(LPVOID unused)
 					stop_session(false, false);
 				else
 					obs_log(LOG_INFO, "engine: STOP ignored (buffer not running)");
+				break;
+			case CMD_FORCE_STOP:
+				if (s.out)
+					stop_session(true, false);
+				else
+					obs_log(LOG_INFO, "engine: FORCE STOP ignored (buffer not running)");
 				break;
 			case CMD_SAVE:
 				handle_save();
@@ -1376,11 +1406,10 @@ void rr_engine_selftest_reference(const char *out_dir)
 		g_ref_mkv[0] = 0;
 }
 
-bool rr_engine_wait_off(uint32_t timeout_ms)
+/* Polls the published state until OFF, until the engine is going away, or
+ * until timeout_ms passes (then false). */
+static bool wait_off_for(uint32_t timeout_ms)
 {
-	if (!g_inited)
-		return true;
-
 	const uint64_t deadline = os_gettime_ns() + (uint64_t)timeout_ms * 1000000ull;
 	for (;;) {
 		struct rr_status snap;
@@ -1393,6 +1422,62 @@ bool rr_engine_wait_off(uint32_t timeout_ms)
 			return false;
 		os_sleep_ms(50);
 	}
+}
+
+bool rr_engine_wait_off(uint32_t timeout_ms)
+{
+	if (!g_inited)
+		return true;
+	return wait_off_for(timeout_ms);
+}
+
+bool rr_engine_halt_for_video_reset(void)
+{
+	if (!g_inited)
+		return true;
+
+	/* The stop request goes in before the state is sampled, so a SAVE that
+	 * was already queued cannot be accepted after this point. */
+	struct rr_cmd cmd = {0};
+	cmd.type = CMD_STOP;
+	enqueue_cmd(&cmd);
+
+	struct rr_status snap;
+	rr_engine_get_status(&snap);
+	if (snap.state == RR_STATE_SAVING) {
+		/* Waiting a long window out takes tens of seconds; cancel the
+		 * remux instead (bounded by one segment of it). */
+		obs_log(LOG_INFO, "engine: video reset: cancelling the in-flight save");
+		InterlockedExchange(&g_save_cancel, 1);
+	}
+
+	if (wait_off_for(RR_RESET_STOP_WAIT_MS))
+		return true;
+
+	if (InterlockedCompareExchange(&g_save_cancel, 0, 0) == 0) {
+		obs_log(LOG_WARNING, "engine: video reset: not OFF after %u s, cancelling any running save",
+			RR_RESET_STOP_WAIT_MS / 1000u);
+		InterlockedExchange(&g_save_cancel, 1);
+	} else {
+		obs_log(LOG_WARNING, "engine: video reset: not OFF after %u s although the save was cancelled",
+			RR_RESET_STOP_WAIT_MS / 1000u);
+	}
+	if (wait_off_for(RR_RESET_CANCEL_WAIT_MS))
+		return true;
+
+	obs_log(LOG_WARNING, "engine: video reset: not OFF after %u s, forcing the buffer stop",
+		(RR_RESET_STOP_WAIT_MS + RR_RESET_CANCEL_WAIT_MS) / 1000u);
+	cmd.type = CMD_FORCE_STOP;
+	enqueue_cmd(&cmd);
+
+	if (wait_off_for(RR_RESET_FORCE_WAIT_MS))
+		return true;
+
+	obs_log(LOG_ERROR,
+		"engine: video reset: the buffer is still not OFF after %u s (stop, save cancel, "
+		"force stop): the plugin output and encoders are still holding the video mode",
+		(RR_RESET_STOP_WAIT_MS + RR_RESET_CANCEL_WAIT_MS + RR_RESET_FORCE_WAIT_MS) / 1000u);
+	return false;
 }
 
 void rr_engine_get_status(struct rr_status *out)

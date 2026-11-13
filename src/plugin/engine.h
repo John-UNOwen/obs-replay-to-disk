@@ -37,7 +37,18 @@ void rr_engine_shutdown(void);                     /* QUIT + join, bounded */
 void rr_engine_start(const struct rr_config *cfg); /* cfg is copied */
 void rr_engine_stop(void);
 void rr_engine_save(void);
-bool rr_engine_wait_off(uint32_t timeout_ms);     /* for PROFILE_CHANGING */
+bool rr_engine_wait_off(uint32_t timeout_ms); /* for PROFILE_CHANGING */
+
+/* B8/D16, before a video reset (a profile switch): OBS resets the video
+ * subsystem on the switch, and libobs only performs that reset while no
+ * raw-video consumer is active — the plugin's output and video encoder hold
+ * one each until the session is released, so the buffer has to reach OFF (all
+ * objects released) before the switch proceeds. A fixed short wait cannot
+ * cover it (STOP is deferred while SAVING, and a plain stop takes up to
+ * 5 s + 2 s), so this blocks the calling (UI) thread and escalates within a
+ * bounded time: stop, then cancel a running save, then a forced stop on the
+ * worker. Returns false when the engine still is not OFF afterwards. */
+bool rr_engine_halt_for_video_reset(void);
 void rr_engine_get_status(struct rr_status *out); /* copies a mutex-guarded snapshot */
 
 /* Self-test only (handoff 7.2 RR_SELFTEST_REFERENCE): the worker also records
