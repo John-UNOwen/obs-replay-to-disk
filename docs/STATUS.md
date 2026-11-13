@@ -251,3 +251,95 @@
     present during the runs; it was left untouched (all launches/kills/closes targeted
     only PIDs started by this WP).
 
+## WP4 save flow: core DONE — acceptance G not run (host wedged, see Open problems)
+- Date: 2026-11-12
+- Commits: 103c14b 5324a7f 661577f 4a12229 (+ this status commit)
+- Acceptance (rig, `RR_SELFTEST=save`, encoder `obs_qsv11_v2` default CBR, media
+  `.testrig/media/src.mp4` 30 fps, runs in `.testrig/runs/wp4-*`; OBS logs print
+  UTC timestamps ≈7 h behind host wall clock):
+  - PASS: `RR_SELFTEST_SAVES=20,60` with `RR_SELFTEST_WINDOW=30` gives a ~20 s clip
+    and a full-window clip. Run wp4-A2: `Replay_2026-11-12_14-31-53.mp4` ffprobe
+    duration 20.032 s (600 frames, band 19–21 s) and
+    `Replay_2026-11-12_14-32-33.mp4` 31.000 s (930 frames, band 30.0–31.1 s);
+    `verify_remux.py` exit 0 with `matched_in_order==packets` on both vs the
+    `RR_SELFTEST_REFERENCE=1` `reference.mkv`; `ffmpeg -v warning -map 0 -f null -`
+    silent for both; both `save finished:` lines show `warnings=0`. The first attempt
+    (wp4-A) FAILED at 18.00 s: the selftest run clock started at thread creation, so
+    save@20 s fired after ~18 s of buffered video (encoder init ≈2.4 s + scene load);
+    4a12229 gates the run clock on `BUFFERING` and A2 passed.
+  - PASS: `since_last_save` vs `window` scope. wp4-B1 (`SCOPE=since_last_save
+    SAVES=60,72`): second clip 12.00 s (360 frames) — exactly the time since the
+    previous save. wp4-B2 (`SCOPE=window`, same SAVES): second clip 30.000 s — the
+    window clamp (`max(window_start, last_save_end)` does not apply; the window wins).
+  - PASS: two saves ≤1 s apart → exactly one remux, the other logged and ignored,
+    file intact. wp4-C (`SAVES=45,45.5`): log shows one `save started:`/`save
+    finished:` pair and one `engine: SAVE ignored (saving)`;
+    `Replay_2026-11-12_14-38-00.mp4` verifies 900/900 video and 1407/1407 audio
+    packets (`exit 0`), ffmpeg silent, duration 30.021 s.
+  - PASS: `RR_SELFTEST_TRACKS=2` saves two audio tracks. ffprobe on the saved mp4
+    lists exactly `0 h264 video`, `1 aac audio`, `2 aac audio`.
+  - PASS: no `*.rrpart` after completed saves; kill mid-remux leaves the part; next
+    start deletes it and the save folder works again. Listing after A2/B1/B2/C/D: 0
+    `*.rrpart`. wp4-E1 (window 120 s + `Bitrate=150000` to widen the remux): killed
+    the saved-PID obs64 (96172) ~22 ms after `save started` 14:42:14.436;
+    `Replay_2026-11-12_14-42-14.mp4.rrpart` (41,418,800 B) remained (and
+    `obs-ffmpeg-mux` died with OBS — E21, never killed by us; user OBS 112092
+    untouched). A restart into the same buffer directory logged `engine: removed
+    stale part: ...\Replay_2026-11-12_14-42-14.mp4.rrpart`, and its own save then
+    completed normally (0 parts left after; `Replay_2026-11-12_14-42-50.mp4`).
+  - PASS: pruning pauses during SAVING and resumes after. wp4-F (window 420 s):
+    `save started` 14:50:46.269 → `save finished: ... took=1.47s warnings=0`
+    14:50:47.741; zero `pruned:` lines in that window (the `prune()` early-return);
+    pruning continued right after unpin, the first two backlogged candidates pruned
+    within one boundary (`pruned: ...rrseg_2026-11-12_14-43-23.mkv`, `..._14-43-37.mkv`).
+    Run total: 4 prunes, 0 during SAVING. A dedicated 1800 s/150 kbps run for a longer
+    pinned-backlog burst could not start (see Open problems); the pause + resume-after
+    behavior is fully evidenced above.
+  - NOT RUN: close OBS during SAVING (WM_CLOSE) → exits cleanly ≤5 s, leaks line.
+    No OBS instance can finish startup on this host since ≈21:54 local (see Open
+    problems). The close-at-save recipe and scripts are in place
+    (`.testrig/scripts/start-save.ps1` + `close-at-save.ps1` + `wait-run.ps1`).
+  - PASS (after the final state): zero-warning builds. `cmake --build --preset
+    windows-x64 --config RelWithDebInfo`: exit 0, 0 warnings; CI posture
+    (`build_check`, `CMAKE_COMPILE_WARNING_AS_ERROR=ON`): exit 0; stricter
+    (`build_w4`, `/W4 /WX`): exit 0; `ctest --test-dir build_x64 -R core
+    -C RelWithDebInfo`: `100% tests passed`; clang-format 19.1.1
+    `--dry-run -Werror` clean over all `src/**/*.{c,h}`; gersemi 0.29.2 `--check`
+    clean on `CMakeLists.txt`.
+- Deviations from the handoff:
+  - 5.6 step 8's "play the save sound": `rr_play_save_sound()` in `platform-win.c`
+    uses `MessageBeep(MB_OK)` / `MessageBeep(MB_ICONERROR)` — system sound, no media
+    file, no-op on non-Windows.
+  - `RR_SELFTEST_TRACKS` and `RR_SELFTEST_BITRATE` are selftest-only overrides (used
+    for D and the widened remux); production settings keep the 5.8 values.
+  - The selftest run clock is gated on `BUFFERING` (4a12229) so `RR_SELFTEST_SAVES`
+    counts seconds of buffered video; without it hardware-encoder init delays shorten
+    the first clip (wp4-A, see A box).
+  - The global proc `void rolling_replay_save()` and the
+    `void rolling_replay_saved(string path)` signal are registered in
+    `obs_module_load` on the process-wide handlers. OBS 33.0.1 offers no
+    `proc_handler_remove` and no per-handler signal removal (only
+    `signal_handler_remove_current` from inside a callback), so they live for the
+    process lifetime; they read engine state under the status mutex and no-op when
+    the engine is stopped. Duplicate-registration warnings on reload are checked.
+  - `save_paths` capacity `RR_MAX_SAVE_SEGS=512` (> 1800 s / ~10 s + headroom): a
+    selection over capacity fails the save through the normal `save failed:` path.
+  - Rig-local: `wait-run.ps1` pins the OBS log by the `runs\<tag>` string because
+    OBS keeps an open log flush-ambiguous while another `--multi` instance runs
+    (newest-by-mtime picked the wrong instance's log).
+- Open problems:
+  - Acceptance G blocked by a host fault that started ≈21:54 local, after F finished:
+    every new obs64 (with or without this plugin, fresh portable config, with or
+    without `--multi`/`--minimize-to-tray`) hangs at the same point — the log ends at
+    `Created scene collection 'Untitled' (clean, ...)` / `Loaded scenes` and the main
+    thread never returns (frida stack shows Qt window-show/DWM frames, 0 context
+    switches; a `MessageBoxTimeoutW` probe shows windows, the user's long-running OBS
+    112092 stays responsive, `DwmGetWindowAttribute` answers instantly). Hung
+    instances were killed by saved PID only; a reboot or logoff is needed before G (or
+    any further OBS run) can execute. F's pinned-backlog-burst variant was blocked by
+    the same fault.
+  - `rolling_replay_saved` fires from the save path but no in-app subscriber exists
+    yet; WP5's UI will consume it.
+  - `rr_selftest_media` persists as a global source in the rig collection (WP3
+    carry-over).
+
