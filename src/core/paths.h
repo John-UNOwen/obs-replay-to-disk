@@ -7,6 +7,10 @@
 
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum rr_path_error { RR_PATH_OK, RR_PATH_EMPTY, RR_PATH_DRIVE_ROOT, RR_PATH_SAME_AS_OUTPUT, RR_PATH_NOT_ABSOLUTE };
 
 /* A buffer folder may not be empty, a drive root (C:\, D:/), the same folder
@@ -15,3 +19,7 @@ enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char 
 
 bool rr_paths_is_segment_name(const char *file_name); /* "rrseg_*.mkv" only */
 bool rr_paths_is_part_name(const char *file_name);    /* "*.rrpart" only */
+
+#ifdef __cplusplus
+}
+#endif

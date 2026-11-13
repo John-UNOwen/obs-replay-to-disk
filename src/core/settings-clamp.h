@@ -5,8 +5,16 @@
  */
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define RR_WINDOW_SEC_MIN 30
 #define RR_WINDOW_SEC_MAX 1800
 
 /* Clamp a buffer length in seconds to 30–1800. */
 int rr_settings_clamp_window_sec(int sec);
+
+#ifdef __cplusplus
+}
+#endif

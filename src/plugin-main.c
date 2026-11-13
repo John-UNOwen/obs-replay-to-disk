@@ -17,8 +17,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 /* Module entry: engine lifetime against the frontend events (D16/B8), the
- * 5.8 autostart, the global proc and saved signal (8.5), and the self-test
- * hook (D18, handoff 7.2, modes `buffer` and `save`).
+ * 5.8 autostart, the hotkeys (B6, snippet 8.3), the UI bridge for the Qt
+ * dialog/dock (plugin-ui.h), the global proc and saved signal (8.5), and the
+ * self-test hook (D18, handoff 7.2, modes `buffer` and `save`).
  * All UI-thread work (obs_frontend_*, folder resolution) happens here before
  * rr_engine_start; the worker never calls obs_frontend_*.
  */
@@ -40,6 +41,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <sys/stat.h>
 
 #include "plugin/engine.h"
+#include "plugin/plugin-ui.h"
 #include "plugin/settings.h"
 
 OBS_DECLARE_MODULE()
@@ -76,6 +78,65 @@ static void on_save_proc(void *data, calldata_t *cd)
 	rr_engine_save(); /* queue only; the worker decides per 5.3 */
 }
 
+/* ------------------------------------------------------------------ hotkeys */
+
+/* B6 / snippet 8.3: the names are stable keys OBS writes to the profile's
+ * basic.ini [Hotkeys]; the display text comes from the locale. */
+static obs_hotkey_id g_save_hotkey = OBS_INVALID_HOTKEY_ID;
+static obs_hotkey_id g_toggle_hotkey = OBS_INVALID_HOTKEY_ID;
+
+static void on_save_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(data);
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	if (pressed)
+		rr_engine_save();
+}
+
+/* Toggle: when off (or after an error, which returns the state to OFF),
+ * start from a snapshot of the current settings whose folders are resolved
+ * here on the UI thread (rr_plugin_start); otherwise stop. */
+static void on_toggle_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(data);
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	if (!pressed)
+		return;
+
+	struct rr_status st;
+	rr_engine_get_status(&st);
+	if (st.state == RR_STATE_OFF)
+		rr_plugin_start();
+	else
+		rr_plugin_stop();
+}
+
+/* Snippet 8.3 verbatim: OBS saves hotkey bindings but does not load them for
+ * plugins. Call on the UI thread at FINISHED_LOADING and PROFILE_CHANGED. */
+static void load_hotkey(obs_hotkey_id id, const char *name)
+{
+	const char *json = config_get_string(obs_frontend_get_profile_config(), "Hotkeys", name);
+	if (!json)
+		return;
+	obs_data_t *data = obs_data_create_from_json(json);
+	if (!data)
+		return;
+	obs_data_array_t *bindings = obs_data_get_array(data, "bindings");
+	obs_hotkey_load(id, bindings);
+	obs_data_array_release(bindings);
+	obs_data_release(data);
+}
+
+static void load_hotkeys(void)
+{
+	if (g_save_hotkey != OBS_INVALID_HOTKEY_ID)
+		load_hotkey(g_save_hotkey, "ReplayToDisk.Save");
+	if (g_toggle_hotkey != OBS_INVALID_HOTKEY_ID)
+		load_hotkey(g_toggle_hotkey, "ReplayToDisk.Toggle");
+}
+
 /* ------------------------------------------------- recording-path resolution */
 
 /* OBS 33 has no obs_frontend_get_recording_directory() (wp1-findings:
@@ -99,15 +160,14 @@ static void resolve_recording_dir(char *out, size_t out_sz)
 	}
 }
 
-/* UI thread only. Empty dirs mean "the OBS recording path" (5.8, D12). */
+/* UI thread only. Empty dirs mean "the OBS recording path" (5.8, D12): the
+ * same defaults the dialog shows greyed, via one shared resolver. */
 static void resolve_dirs(struct rr_config *cfg)
 {
-	char rec[RR_PATHLEN];
-	resolve_recording_dir(rec, sizeof(rec));
-	if (!cfg->output_dir[0] && rec[0])
-		snprintf(cfg->output_dir, sizeof(cfg->output_dir), "%s", rec);
-	if (!cfg->buffer_dir[0] && rec[0])
-		snprintf(cfg->buffer_dir, sizeof(cfg->buffer_dir), "%s\\.rolling-replay-buffer", rec);
+	char buf[RR_PATHLEN], out[RR_PATHLEN];
+	rr_plugin_effective_dirs(cfg, buf, sizeof(buf), out, sizeof(out));
+	snprintf(cfg->buffer_dir, sizeof(cfg->buffer_dir), "%s", buf);
+	snprintf(cfg->output_dir, sizeof(cfg->output_dir), "%s", out);
 }
 
 static void start_from_settings(void)
@@ -118,9 +178,8 @@ static void start_from_settings(void)
 	} else {
 		cfg = g_settings;
 		resolve_dirs(&cfg);
-		snprintf(g_start_cfg.buffer_dir, sizeof(g_start_cfg.buffer_dir), "%s", cfg.buffer_dir);
-		snprintf(g_start_cfg.output_dir, sizeof(g_start_cfg.output_dir), "%s", cfg.output_dir);
-		g_start_cfg_valid = true; /* a profile switch restarts with the same folders */
+		g_start_cfg = cfg; /* full snapshot: a profile switch restarts with the same settings and folders */
+		g_start_cfg_valid = true;
 	}
 	rr_engine_start(&cfg);
 }
@@ -331,6 +390,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		load_hotkeys(); /* B6: reload the profile's bindings (8.3) */
 		if (g_selftest) {
 			selftest_start();
 		} else if (g_settings.autostart) {
@@ -347,6 +407,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 		break;
 
 	case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
+		load_hotkeys(); /* the new profile carries its own bindings (B6) */
 		if (g_settings.autostart) {
 			obs_log(LOG_INFO, "engine: profile changed, autostarting the buffer");
 			start_from_settings();
@@ -388,12 +449,30 @@ bool obs_module_load(void)
 	if (g_selftest)
 		obs_log(LOG_INFO, "selftest: RR_SELFTEST=%s armed", mode);
 
+	/* B6 / 8.3: register the hotkeys at load (they appear in
+	 * Settings -> Hotkeys); their bindings load at FINISHED_LOADING and
+	 * PROFILE_CHANGED. Names are stable keys; display text is locale. */
+	g_save_hotkey =
+		obs_hotkey_register_frontend("ReplayToDisk.Save", obs_module_text("Hotkey.Save"), on_save_hotkey, NULL);
+	g_toggle_hotkey = obs_hotkey_register_frontend("ReplayToDisk.Toggle", obs_module_text("Hotkey.Toggle"),
+						       on_toggle_hotkey, NULL);
+
+#ifdef RR_UI
+	rr_settings_dialog_install(); /* Tools menu item -> the dialog (WP5) */
+	rr_status_dock_install();     /* "replay_to_disk_dock" (WP5) */
+#endif
+
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
 	return true;
 }
 
 void obs_module_unload(void)
 {
+#ifdef RR_UI
+	rr_settings_dialog_uninstall();
+	rr_status_dock_uninstall();
+#endif
+
 	obs_frontend_remove_event_callback(on_frontend_event, NULL);
 
 	/* The EXIT event stops the engine already; this is the bounded safety
@@ -407,4 +486,78 @@ void obs_module_unload(void)
 	selftest_detach_media();
 
 	obs_log(LOG_INFO, "plugin unloaded");
+}
+
+/* ------------------------------------------------------------- UI bridge
+ * (plugin-ui.h): the Qt dialog/dock work through these, so the recording-path
+ * resolver and the settings live in exactly one place, on the UI thread.
+ */
+
+void rr_plugin_get_settings(struct rr_config *out)
+{
+	if (out)
+		*out = g_settings;
+}
+
+bool rr_plugin_set_settings(const struct rr_config *cfg)
+{
+	if (!cfg)
+		return false;
+
+	struct rr_config copy = *cfg;
+	rr_settings_clamp(&copy);     /* clamp on set (5.8) */
+	if (!rr_settings_save(&copy)) /* saves the clamped copy through settings.c */
+		return false;
+
+	g_settings = copy;
+	g_start_cfg_valid = false; /* the next start re-resolves the folders from the new settings */
+	return true;
+}
+
+void rr_plugin_effective_dirs(const struct rr_config *cfg, char *buffer_dir, size_t buffer_sz, char *output_dir,
+			      size_t output_sz)
+{
+	char rec[RR_PATHLEN];
+	resolve_recording_dir(rec, sizeof(rec));
+
+	if (output_dir) {
+		output_dir[0] = 0;
+		if (cfg && cfg->output_dir[0])
+			snprintf(output_dir, output_sz, "%s", cfg->output_dir);
+		else if (rec[0])
+			snprintf(output_dir, output_sz, "%s", rec);
+	}
+	if (buffer_dir) {
+		buffer_dir[0] = 0;
+		if (cfg && cfg->buffer_dir[0])
+			snprintf(buffer_dir, buffer_sz, "%s", cfg->buffer_dir);
+		else if (rec[0])
+			snprintf(buffer_dir, buffer_sz, "%s\\.rolling-replay-buffer", rec); /* D12 default */
+	}
+}
+
+void rr_plugin_start(void)
+{
+	/* Current settings snapshot, folders resolved here on the UI thread. */
+	struct rr_config cfg = g_settings;
+	char buf[RR_PATHLEN], out[RR_PATHLEN];
+	rr_plugin_effective_dirs(&cfg, buf, sizeof(buf), out, sizeof(out));
+	snprintf(cfg.buffer_dir, sizeof(cfg.buffer_dir), "%s", buf);
+	snprintf(cfg.output_dir, sizeof(cfg.output_dir), "%s", out);
+	rr_engine_start(&cfg);
+}
+
+void rr_plugin_stop(void)
+{
+	rr_engine_stop();
+}
+
+void rr_plugin_save(void)
+{
+	rr_engine_save();
+}
+
+bool rr_plugin_wait_off(uint32_t timeout_ms)
+{
+	return rr_engine_wait_off(timeout_ms);
 }

@@ -7,6 +7,10 @@
 
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define RR_PATHLEN 1024
 #define RR_ENC_ID_LEN 64
 #define RR_FILENAME_FMT_LEN 256
@@ -54,3 +58,7 @@ int rr_config_track_count(const struct rr_config *cfg);
 /* Total encoder bitrate for the disk estimate: video bitrate (or 50 Mbps
  * assumed for constant quality, 5.5 step 3) plus the audio tracks. */
 int rr_config_total_bitrate_kbps(const struct rr_config *cfg);
+
+#ifdef __cplusplus
+}
+#endif

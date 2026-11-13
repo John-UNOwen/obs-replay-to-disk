@@ -8,6 +8,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Estimated bytes a full window of segments takes: bitrate × window. */
 int64_t rr_space_estimate_bytes(int bitrate_kbps_total, int window_sec);
 
@@ -15,3 +19,7 @@ int64_t rr_space_estimate_bytes(int bitrate_kbps_total, int window_sec);
  * is room: 2 × estimate + 1 GiB on the shared drive (the buffer plus the
  * worst-case save), else 1 × estimate + 1 GiB on each drive. */
 bool rr_space_preflight(int64_t estimate, int64_t free_buffer, int64_t free_output, bool same_drive);
+
+#ifdef __cplusplus
+}
+#endif
