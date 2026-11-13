@@ -21,3 +21,14 @@ struct rr_window {
  * Returns false when no closed segment overlaps the window. */
 bool rr_window_select(const rr_ledger_t *l, uint64_t window_end_ns, int window_sec, uint64_t last_save_end_ns,
 		      struct rr_window *out);
+
+/* End of the footage a successful save actually wrote, for the since-last-save
+ * bookkeeping (5.6 step 8). It is the end of the last segment written — the
+ * last of the selected range, its predecessor when rr_remux reported
+ * skipped_tail (an unreadable stub left out of the clip) — which can sit
+ * below the requested window end. 0 when the save must not advance the
+ * boundary at all: an unreleased segment cut the run off while unsaved
+ * in-window footage stayed below it, or the range is not (anymore) in the
+ * ledger. Advancing past the written end over such footage would claim it
+ * saved, so no later save offers it again and prune eventually deletes it. */
+uint64_t rr_window_saved_end(const rr_ledger_t *l, const struct rr_window *w, int skipped_tail);

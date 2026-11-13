@@ -48,3 +48,28 @@ bool rr_window_select(const rr_ledger_t *l, uint64_t window_end_ns, int window_s
 	out->end_ns = window_end_ns;
 	return true;
 }
+
+uint64_t rr_window_saved_end(const rr_ledger_t *l, const struct rr_window *w, int skipped_tail)
+{
+	if (w->count < 1)
+		return 0;
+
+	struct rr_segment_info first, last;
+	if (!rr_ledger_get(l, (size_t)w->first, &first))
+		return 0;
+
+	/* The run starts past the window start although older segments exist:
+	 * the walk broke at an unreleased segment, so footage below the run was
+	 * in the window and is not in the clip. The boundary must not move —
+	 * whatever releases later stays ahead of the next save's start. */
+	if (w->first > 0 && first.start_ns > w->start_ns)
+		return 0;
+
+	int idx = w->first + w->count - 1;
+	if (skipped_tail && idx > w->first)
+		idx--; /* the newest selected segment was an unreadable stub, not written */
+
+	if (!rr_ledger_get(l, (size_t)idx, &last))
+		return 0;
+	return last.end_ns;
+}

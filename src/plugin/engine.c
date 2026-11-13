@@ -108,7 +108,7 @@ static struct {
 	bool stop_requested; /* the stop sequence is waiting for OUTPUT_STOPPED */
 	bool stop_seen;      /* OUTPUT_STOPPED arrived */
 
-	uint64_t last_save_end_ns; /* end of the last successful save (scope since_last_save) */
+	uint64_t last_save_end_ns; /* end of the footage the last save wrote (scope since_last_save; 0 = nothing yet) */
 
 	char pending_del[RR_PENDING_DELETES][RR_PATHLEN]; /* failed prunes, retried on idle (5.4) */
 	size_t pending_del_count;
@@ -1261,8 +1261,16 @@ static void handle_save(void)
 					}
 
 					if (ok) {
-						/* Step 8: success bookkeeping */
-						s.last_save_end_ns = window_end;
+						/* Step 8: success bookkeeping — advance the since-last-save
+						 * boundary only to the end of what this save wrote (the
+						 * last segment written, not to window_end): window_end can
+						 * sit past an unreleased hole-break or a skipped unreadable
+						 * tail, and claiming that footage saved would hide it from
+						 * every later save until prune deletes it. 0 = do not move. */
+						const uint64_t saved_end =
+							rr_window_saved_end(s.ledger, &w, res.skipped_tail);
+						if (saved_end > s.last_save_end_ns)
+							s.last_save_end_ns = saved_end;
 
 						EnterCriticalSection(&st_cs);
 						snprintf(g_status.last_saved, sizeof(g_status.last_saved), "%s",

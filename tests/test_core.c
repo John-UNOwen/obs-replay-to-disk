@@ -424,6 +424,74 @@ static void since_last_save_moves_window_start(void)
 	rr_ledger_destroy(l);
 }
 
+static void saved_end_advances_only_over_written_footage(void)
+{
+	/* The round-2 checkup probe, on the real core: seg0 [0,10) closed,
+	 * seg1 [10,20) ended NOT closed (release wait failed), seg2 [20,30)
+	 * closed; 30 s window ending at 30 s. The run stops at the hole and
+	 * covers seg2 alone — footage below the hole is in the window but not
+	 * in the clip. */
+	const uint64_t times[] = {0, SEC(10), SEC(20), SEC(30)};
+	rr_ledger_t *l = rr_ledger_create(30);
+
+	rr_ledger_seed(l, "C:/buf/rrseg_00.mkv", times[0]);
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_01.mkv", times[1]) == 0);
+	rr_ledger_mark_closed(l, 0, MIB(40));
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_02.mkv", times[2]) == 1); /* seg1 never released yet */
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_03.mkv", times[3]) == 2);
+	rr_ledger_mark_closed(l, 2, MIB(40));
+
+	struct rr_window w;
+	assert(rr_window_select(l, SEC(30), 30, 0, &w));
+	assert(w.first == 2 && w.count == 1);
+
+	/* The clip does not reach back to the window start while older
+	 * in-window segments stay unsaved: the since-last-save boundary must
+	 * NOT move (0) — advancing it would skip seg0/seg1 forever. */
+	assert(rr_window_saved_end(l, &w, 0) == 0);
+
+	/* Once seg1 releases (the idle retry closes it), a save from the
+	 * unchanged boundary takes the whole run again — seg1 included. */
+	rr_ledger_mark_closed(l, 1, MIB(40));
+	assert(rr_window_select(l, SEC(30), 30, 0, &w));
+	assert(w.first == 0 && w.count == 3);
+	assert(rr_window_saved_end(l, &w, 0) == SEC(30));
+	rr_ledger_destroy(l);
+
+	/* Normal full run, nothing skipped: the boundary may reach window_end
+	 * (unchanged behavior). */
+	rr_ledger_t *l2 = make_chain(30, 4, times, MIB(40));
+	assert(rr_window_select(l2, SEC(30), 30, 0, &w));
+	assert(w.first == 0 && w.count == 3);
+	assert(rr_window_saved_end(l2, &w, 0) == SEC(30));
+
+	/* skipped_tail: rr_remux left the newest selected segment out of the
+	 * clip (unreadable stub) — only the footage up to the predecessor's
+	 * end was written, and the stub stays ahead of the next save's start. */
+	assert(rr_window_saved_end(l2, &w, 1) == SEC(20));
+
+	/* Truncated at the newest end (the hold-scenario shape): a run that
+	 * reaches the window start but stops below window_end at an unreleased
+	 * segment above it — advance to the run's end so the held segment is
+	 * offered to the next save once it releases. */
+	w.first = 0;
+	w.count = 2;
+	assert(rr_window_saved_end(l2, &w, 0) == SEC(20));
+
+	/* Degenerate and out-of-range shapes: a single-segment save cannot
+	 * skip its own tail (the remux fails instead), and a range outside
+	 * the ledger yields 0 = do not advance. */
+	w.start_ns = SEC(20);
+	w.end_ns = SEC(30);
+	w.first = 2;
+	w.count = 1;
+	assert(rr_window_saved_end(l2, &w, 1) == SEC(30));
+	w.first = 5;
+	assert(rr_window_saved_end(l2, &w, 0) == 0);
+
+	rr_ledger_destroy(l2);
+}
+
 static void buffered_seconds_is_capped_at_window(void)
 {
 	rr_ledger_t *l = rr_ledger_create(10);
@@ -621,6 +689,7 @@ int main(void)
 	RUN(window_inpoint_is_offset_into_first_segment);
 	RUN(window_larger_than_buffer_selects_everything_inpoint_zero);
 	RUN(since_last_save_moves_window_start);
+	RUN(saved_end_advances_only_over_written_footage);
 	RUN(buffered_seconds_is_capped_at_window);
 	RUN(space_estimate_and_preflight);
 	RUN(buffer_dir_drive_root_is_refused);
