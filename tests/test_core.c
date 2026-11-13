@@ -805,6 +805,44 @@ static void save_filename_must_be_bare(void)
 
 	assert(!rr_paths_is_safe_filename(""));
 	assert(!rr_paths_is_safe_filename(NULL));
+
+	/* The remaining Windows-illegal characters: the dialog must refuse the
+	 * format at Apply rather than let every save fail at the file open
+	 * (CreateFile -> ERROR_INVALID_NAME). "Best Moment?" is the report's
+	 * repro spelling. */
+	assert(!rr_paths_is_safe_filename("Best Moment?.mp4"));
+	assert(!rr_paths_is_safe_filename("a?.mp4"));
+	assert(!rr_paths_is_safe_filename("a*.mp4"));
+	assert(!rr_paths_is_safe_filename("a|.mp4"));
+	assert(!rr_paths_is_safe_filename("a\"x.mp4"));
+	assert(!rr_paths_is_safe_filename("a<x.mp4"));
+	assert(!rr_paths_is_safe_filename("a>.mp4"));
+
+	/* A trailing dot or space: Windows strips it, so the stored file never
+	 * matches the name the engine opens back. */
+	assert(!rr_paths_is_safe_filename("Replay."));
+	assert(!rr_paths_is_safe_filename("Replay "));
+	assert(!rr_paths_is_safe_filename("Replay_. "));
+
+	/* Reserved Win32 device base names, any case, with or without an
+	 * extension: CreateFile on the base name fails even under ".mp4". */
+	assert(!rr_paths_is_safe_filename("CON"));
+	assert(!rr_paths_is_safe_filename("con.mp4"));
+	assert(!rr_paths_is_safe_filename("PRN.txt"));
+	assert(!rr_paths_is_safe_filename("AUX.mp4"));
+	assert(!rr_paths_is_safe_filename("nul"));
+	assert(!rr_paths_is_safe_filename("COM1.mp4"));
+	assert(!rr_paths_is_safe_filename("COM9"));
+	assert(!rr_paths_is_safe_filename("LPT1.mp4"));
+	assert(!rr_paths_is_safe_filename("lpt9.mp4"));
+
+	/* Not reserved bases: a two-digit port, a leading zero, or the word only
+	 * as a substring — these must still be accepted as ordinary names. */
+	assert(rr_paths_is_safe_filename("COM10.mp4"));
+	assert(rr_paths_is_safe_filename("LPT0.mp4"));
+	assert(rr_paths_is_safe_filename("myCON.mp4"));
+	assert(rr_paths_is_safe_filename("AUXFILE.mp4"));
+	assert(rr_paths_is_safe_filename("CONSOLE.mp4"));
 }
 
 static void window_seconds_clamped_30_1800(void)

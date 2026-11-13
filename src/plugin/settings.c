@@ -63,8 +63,18 @@ void rr_settings_clamp(struct rr_config *cfg)
 	if (cfg->audio_tracks == 0)
 		cfg->audio_tracks = 1; /* at least one bit (5.8) */
 	cfg->audio_bitrate_kbps = clamp_int(cfg->audio_bitrate_kbps, RR_AUDIO_BITRATE_MIN, RR_AUDIO_BITRATE_MAX);
-	if (!cfg->filename_format[0])
+	if (!cfg->filename_format[0] || !rr_paths_is_safe_filename(cfg->filename_format)) {
+		if (cfg->filename_format[0]) {
+			/* A hand-edited settings.json can bypass the dialog's Apply check;
+			 * warn here (config time) and fall back, so the bad name never
+			 * reaches the save (which would fail every open). */
+			obs_log(LOG_WARNING,
+				"settings: filename_format '%.255s' is not a usable Windows file name, falling back "
+				"to the default",
+				cfg->filename_format);
+		}
 		snprintf(cfg->filename_format, sizeof(cfg->filename_format), "%s", RR_FILENAME_FMT_DEFAULT);
+	}
 	if (!cfg->extra_encoder_settings[0])
 		snprintf(cfg->extra_encoder_settings, sizeof(cfg->extra_encoder_settings), "%s", "{}");
 }

@@ -294,17 +294,81 @@ bool rr_paths_is_segment_name(const char *file_name)
 	return true;
 }
 
+/* Case-insensitive compare of a fixed-length base name against a literal. */
+static bool base_equals_ci(const char *base, size_t len, const char *lit)
+{
+	if (strlen(lit) != len)
+		return false;
+	for (size_t i = 0; i < len; i++) {
+		if (tolower((unsigned char)base[i]) != tolower((unsigned char)lit[i]))
+			return false;
+	}
+	return true;
+}
+
+/* The Win32 reserved device base names, case-insensitive: CON, PRN, AUX, NUL,
+ * and COM/LPT with a single digit 1-9. These name a device, not a file, so a
+ * file (or its ".mp4"/".rrpart" sibling) can never be created under them.
+ * COM0/LPT0 and COM10+ are ordinary names and are NOT reserved. */
+static bool is_reserved_device_base(const char *base, size_t len)
+{
+	static const char *const kw[] = {"CON", "PRN", "AUX", "NUL"};
+	for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) {
+		if (base_equals_ci(base, len, kw[i]))
+			return true;
+	}
+	if (len == 4 && base[3] >= '1' && base[3] <= '9') {
+		const char a = (char)tolower((unsigned char)base[0]);
+		const char b = (char)tolower((unsigned char)base[1]);
+		const char c = (char)tolower((unsigned char)base[2]);
+		if ((a == 'c' && b == 'o' && c == 'm') || (a == 'l' && b == 'p' && c == 't'))
+			return true; /* COM1-9 / LPT1-9 */
+	}
+	return false;
+}
+
 bool rr_paths_is_safe_filename(const char *name)
 {
 	if (!name || !name[0])
 		return false;
 
+	/* The characters Windows forbids in a file name. A '/' or '\' escapes the
+	 * output folder, a ':' starts a drive or an NTFS stream, and '< > " | ? *'
+	 * are illegal on every volume — a name with one makes CreateFile fail with
+	 * ERROR_INVALID_NAME (123), so every save would break with no way for the
+	 * user to see why. */
 	for (const char *p = name; *p; p++) {
-		if (*p == '/' || *p == '\\' || *p == ':')
+		switch (*p) {
+		case '<':
+		case '>':
+		case ':':
+		case '"':
+		case '/':
+		case '\\':
+		case '|':
+		case '?':
+		case '*':
 			return false;
+		default:
+			break;
+		}
 	}
-	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+
+	/* Windows strips a trailing '.' or space when it resolves a name, so the
+	 * file it stores ("Replay") never matches the one the engine then opens
+	 * ("Replay."). "." and ".." end in a dot and are refused here too. */
+	const size_t n = strlen(name);
+	if (name[n - 1] == '.' || name[n - 1] == ' ')
 		return false;
+
+	/* A reserved device base name is refused whether or not an extension
+	 * follows: the base is everything up to the first '.'. */
+	size_t base_len = 0;
+	while (base_len < n && name[base_len] != '.')
+		base_len++;
+	if (is_reserved_device_base(name, base_len))
+		return false;
+
 	return true;
 }
 

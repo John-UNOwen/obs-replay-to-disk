@@ -43,10 +43,15 @@ enum rr_path_error rr_paths_check_output_dir(const char *output_dir);
 bool rr_paths_is_segment_name(const char *file_name); /* "rrseg_*.mkv" only */
 bool rr_paths_is_part_name(const char *file_name);    /* "*.rrpart" only */
 
-/* True when name is safe to append to one folder: a bare name with no '/' or
- * '\\', no ':' (drive prefix or NTFS stream), and not "." or "..". Used for
- * the generated save file name and for the configured filename_format, so a
- * crafted format can never write outside the output folder. */
+/* True when name is a valid Windows file name for the output folder: no '/'
+ * or '\\' (would escape the folder), no ':' (drive prefix or NTFS stream),
+ * none of the Windows-illegal '< > " | ? *', no trailing '.' or space (Windows
+ * strips them, so the stored name never matches the one later opened), not a
+ * bare "." or "..", and not a reserved device base name (CON, PRN, AUX, NUL,
+ * COM1-9, LPT1-9, case-insensitive, with or without an extension). Used for
+ * the configured filename_format at dialog Apply and settings load, and for
+ * the generated save file name, so a bad format is refused where it is set
+ * instead of failing every save at the file open. */
 bool rr_paths_is_safe_filename(const char *name);
 
 #ifdef __cplusplus

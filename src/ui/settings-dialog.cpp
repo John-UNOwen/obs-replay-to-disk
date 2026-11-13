@@ -433,9 +433,11 @@ bool ReplayToDiskDialog::apply()
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.TrackRequired"));
 		return false;
 	}
-	/* Filename format: a bare-name format only — '/', '\' or ':' would let
-	 * the generated save name escape the output folder (the engine also
-	 * refuses such a name at save time and falls back to the default). */
+	/* Filename format: a valid Windows file name only — a separator or colon
+	 * would let the save escape the output folder, and '< > " | ? *', a
+	 * trailing dot/space or a reserved device name would fail every file open
+	 * (the engine also re-checks the generated name and falls back to the
+	 * default with a warning). */
 	if (cfg.filename_format[0] && !rr_paths_is_safe_filename(cfg.filename_format)) {
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.FilenameFormat"));
 		return false;
