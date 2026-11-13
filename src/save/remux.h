@@ -1,4 +1,5 @@
-/* remux.h — interface of save/remux.c (port of reference/rr_remux.c).
+/* remux.h — interface of save/remux.c. Design notes and remux test results
+ * are in docs/wp1-findings.md and docs/STATUS.md.
  * The struct definitions mirror the declarations at the top of remux.c exactly.
  * License: GPL-2.0-or-later.
  */

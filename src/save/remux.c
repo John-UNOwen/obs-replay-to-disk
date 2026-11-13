@@ -1,6 +1,6 @@
 /* rr_remux: join OBS split-file MKV segments into one MP4 by stream copy.
  *
- * Reference implementation for the rolling-replay plugin's save step.
+ * Shipped implementation of the rolling-replay plugin's save step.
  * It does NOT use the concat demuxer. Timestamps are regenerated per stream:
  *   - video: OBS output is constant frame rate, so every pts is snapped to the
  *     frame grid, and dts is rebuilt from decode order (MKV stores no dts);
@@ -16,7 +16,8 @@
  * Tested with libavformat 60 (FFmpeg 6.1) and libavformat 62 (FFmpeg 8.1.2,
  * the version OBS 33.0.1 ships), on segments recorded by libobs 30.0.2 with
  * x264 (B-frames), SVT-AV1 and AAC, at 60 and 59.94 fps. HEVC was tested on
- * synthetic segments only. See reference/README.md for the results.
+ * synthetic segments only. See docs/wp1-findings.md ("In-process rr_remux
+ * results") and docs/STATUS.md for the results.
  *
  * On failure the partly written output file is left in place; the caller
  * deletes it. Build the test CLI with -DRR_REMUX_MAIN.
