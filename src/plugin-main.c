@@ -482,8 +482,8 @@ void obs_module_unload(void)
 
 	obs_frontend_remove_event_callback(on_frontend_event, NULL);
 
-	/* The EXIT event stops the engine already; this is the bounded safety
-	 * net so no thread of ours runs after the DLL unloads. */
+	/* The EXIT event stopped the engine already; this call re-runs the
+	 * worker join, so no thread of ours runs once unload returns. */
 	InterlockedExchange(&g_st_stop, 1);
 	if (g_st_thread) {
 		WaitForSingleObject(g_st_thread, 8000);

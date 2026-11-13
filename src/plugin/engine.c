@@ -1381,8 +1381,10 @@ void rr_engine_init(void)
 	InitializeCriticalSection(&st_cs);
 	if (os_event_init(&q_wake, OS_EVENT_TYPE_AUTO) != 0)
 		q_wake = NULL;
-	if (os_event_init(&g_done_ev, OS_EVENT_TYPE_MANUAL) != 0)
-		g_done_ev = NULL;
+	if (os_event_init(&g_done_ev, OS_EVENT_TYPE_MANUAL) != 0) {
+		g_done_ev = NULL; /* shutdown falls back to the thread-handle join */
+		obs_log(LOG_WARNING, "engine: worker-done event unavailable, shutdown joins the thread handle");
+	}
 	memset(&g_status, 0, sizeof(g_status));
 	memset(&s, 0, sizeof(s));
 
@@ -1397,18 +1399,36 @@ void rr_engine_init(void)
 
 void rr_engine_shutdown(void)
 {
-	if (!g_inited || g_shutdown_done)
+	if (!g_inited)
 		return;
-	g_shutdown_done = true;
 
-	InterlockedExchange(&g_quit, 1);
-	struct rr_cmd cmd = {0};
-	cmd.type = CMD_QUIT;
-	enqueue_cmd(&cmd);
+	/* Two callers: the frontend EXIT event, then obs_module_unload right
+	 * before OBS tears the process down. The QUIT request is once-only;
+	 * the join below runs on EVERY call (wp1 note 6: the unload-time wait
+	 * is the invariant — the old once-only guard made the second call
+	 * return instantly even when the EXIT-path wait had timed out). */
+	if (!g_shutdown_done) {
+		g_shutdown_done = true;
 
-	if (g_thread && g_done_ev) {
-		if (os_event_timedwait(g_done_ev, 10000) != 0)
+		InterlockedExchange(&g_quit, 1);
+		struct rr_cmd cmd = {0};
+		cmd.type = CMD_QUIT;
+		enqueue_cmd(&cmd);
+
+		if (g_thread && g_done_ev && os_event_timedwait(g_done_ev, 10000) != 0)
 			obs_log(LOG_ERROR, "engine: the worker did not exit within 10 s");
+	}
+
+	/* Returning here means OBS may tear down under the worker: the join is
+	 * what "no thread of ours runs after unload" really requires — the
+	 * event only says worker_main signalled one return before exiting, and
+	 * it is skipped entirely when its os_event_init failed. The wait ends:
+	 * the QUIT path is self-bounded (force stop, rr_remux checks g_quit
+	 * per segment, purge gives up on locked files after ~2 s each). On the
+	 * normal path the worker is already gone and this returns at once. */
+	if (g_thread && WaitForSingleObject(g_thread, INFINITE) == WAIT_OBJECT_0) {
+		CloseHandle(g_thread);
+		g_thread = NULL;
 	}
 }
 
