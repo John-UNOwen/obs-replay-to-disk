@@ -112,7 +112,7 @@ static char save_paths[RR_MAX_SAVE_SEGS][RR_PATHLEN];
 static const char *save_ptrs[RR_MAX_SAVE_SEGS];
 static int save_idx[RR_MAX_SAVE_SEGS];
 
-static void stop_session(bool force);
+static void stop_session(bool force, bool stop_seen);
 static bool wait_output_stopped(unsigned long timeout_ms);
 static void handle_boundary(const char *path, uint64_t t_ns);
 static void handle_save(void);
@@ -626,7 +626,11 @@ static bool start_session(const struct rr_config *cfg_in)
 
 /* ---------------------------------------------------------------- stop (5.7) */
 
-static void stop_session(bool force)
+/* stop_seen: the "stop" signal for this stop has already arrived (the
+ * unexpected-death path runs this sequence *because* of that signal, which
+ * libobs emits exactly once). A fresh graceful stop starts with false and
+ * waits for it. */
+static void stop_session(bool force, bool stop_seen)
 {
 	if (!s.out && !s.ledger) {
 		publish_state(RR_STATE_OFF);
@@ -634,11 +638,20 @@ static void stop_session(bool force)
 	}
 
 	publish_state(RR_STATE_STOPPING);
-	s.stop_seen = false;
+	s.stop_seen = stop_seen;
 	s.stop_requested = true;
 
 	if (s.out) {
-		if (!force) {
+		if (force) {
+			/* QUIT: skip the graceful stop (5.7 note) */
+			obs_output_force_stop(s.out);
+		} else if (!obs_output_active(s.out)) {
+			/* The output already died on its own. libobs's obs_output_stop
+			 * returns early on an inactive output without emitting "stop"
+			 * (obs-output.c:536-537), so waiting for the signal here could
+			 * only ever burn the full timeout: nothing left to wait for. */
+			s.stop_seen = true;
+		} else {
 			/* 5.7 step 1-2 */
 			obs_output_stop(s.out);
 			if (!wait_output_stopped(5000)) {
@@ -647,9 +660,6 @@ static void stop_session(bool force)
 				if (!wait_output_stopped(2000))
 					obs_log(LOG_WARNING, "engine: the output never reported its stop signal");
 			}
-		} else {
-			/* QUIT: skip the graceful stop (5.7 note) */
-			obs_output_force_stop(s.out);
 		}
 	}
 
@@ -844,7 +854,9 @@ static void handle_unexpected_stopped(int code)
 
 	obs_log(LOG_INFO, "buffer error: %s", msg);
 	set_error(msg);
-	stop_session(false);
+	/* This queued OUTPUT_STOPPED is the "stop" signal for the sequence we
+	 * are about to run; libobs will not emit another one. */
+	stop_session(false, true);
 }
 
 /* ------------------------------------------------------- save flow (5.6) */
@@ -1188,7 +1200,7 @@ static void idle_tasks(void)
 		if (free_b < RR_GIB) {
 			obs_log(LOG_INFO, "buffer error: the buffer drive has less than 1 GiB free");
 			set_error("the buffer drive has less than 1 GiB free");
-			stop_session(false);
+			stop_session(false, false);
 			return;
 		}
 	}
@@ -1242,7 +1254,7 @@ static DWORD WINAPI worker_main(LPVOID unused)
 				break;
 			case CMD_STOP:
 				if (s.out)
-					stop_session(false);
+					stop_session(false, false);
 				else
 					obs_log(LOG_INFO, "engine: STOP ignored (buffer not running)");
 				break;
@@ -1276,7 +1288,7 @@ static DWORD WINAPI worker_main(LPVOID unused)
 	/* QUIT: no graceful stop, force and purge (5.7 note, D12) */
 	if (s.out) {
 		obs_log(LOG_INFO, "engine: quitting with the output active, forcing stop");
-		stop_session(true);
+		stop_session(true, false);
 	}
 	os_event_signal(g_done_ev);
 	return 0;
