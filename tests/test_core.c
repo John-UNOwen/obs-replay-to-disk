@@ -352,6 +352,92 @@ static void window_skips_segment_still_being_written(void)
 	rr_ledger_destroy(l);
 }
 
+static void window_selects_older_closed_run_past_held_newest(void)
+{
+	/* Checkup round 2: the typical hold is on the newest rotated file —
+	 * the muxer or a scanner still holds the segment the boundary just
+	 * ended, while every older one is closed. The walk must skip that
+	 * held newest entry and select the older contiguous closed run, not
+	 * refuse a full saveable window. */
+	const uint64_t times[] = {0, SEC(10), SEC(20), SEC(30), SEC(40)};
+	rr_ledger_t *l = rr_ledger_create(30);
+
+	rr_ledger_seed(l, "C:/buf/rrseg_00.mkv", times[0]);
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_01.mkv", times[1]) == 0);
+	rr_ledger_mark_closed(l, 0, MIB(40));
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_02.mkv", times[2]) == 1);
+	rr_ledger_mark_closed(l, 1, MIB(40));
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_03.mkv", times[3]) == 2); /* seg2 ended, still held */
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_04.mkv", times[4]) == 3); /* seg3: the open tail */
+
+	/* The report's probe: 300 s window ending at 40 s → the closed run
+	 * seg0+seg1 is selected with inpoint 0 (before the fix: false,
+	 * "nothing to save"). Whatever is selected stays all-closed. */
+	struct rr_window w;
+	assert(rr_window_select(l, SEC(40), 300, 0, &w));
+	assert(w.first == 0);
+	assert(w.count == 2);
+	assert(secs_eq(w.inpoint_sec, 0.0));
+	for (int i = w.first; i < w.first + w.count; i++) {
+		struct rr_segment_info seg;
+		assert(rr_ledger_get(l, (size_t)i, &seg));
+		assert(seg.closed);
+	}
+
+	/* Inpoint math for the run when the window starts inside it: a 25 s
+	 * window ending at 40 s starts at 15 s → seg1 alone (its end 20 > 15;
+	 * seg0 ended at 10 ≤ 15), inpoint 15 − 10 = 5 s. */
+	assert(rr_window_select(l, SEC(40), 25, 0, &w));
+	assert(w.first == 1);
+	assert(w.count == 1);
+	assert(secs_eq(w.inpoint_sec, 5.0));
+
+	/* The since-last-save boundary may advance to the run's end (20 s):
+	 * the held segment starts exactly there, so releasing it later is
+	 * still offered to the next save — nothing is skipped. */
+	assert(rr_window_select(l, SEC(40), 300, 0, &w));
+	assert(rr_window_saved_end(l, &w, 0) == SEC(20));
+
+	/* Released (the idle probe closes it): the same window now takes the
+	 * whole run — the held footage was never lost, only delayed. */
+	rr_ledger_mark_closed(l, 2, MIB(40));
+	assert(rr_window_select(l, SEC(40), 300, 0, &w));
+	assert(w.first == 0);
+	assert(w.count == 3);
+	assert(rr_window_saved_end(l, &w, 0) == SEC(30));
+
+	/* Since the last save at 15 s with everything closed: start moves to
+	 * 15 s → segs 1,2, inpoint 5 s (unchanged rules on top of the fix). */
+	assert(rr_window_select(l, SEC(40), 300, SEC(15), &w));
+	assert(w.first == 1);
+	assert(w.count == 2);
+	assert(secs_eq(w.inpoint_sec, 5.0));
+
+	rr_ledger_destroy(l);
+
+	/* It stays a refusal when the held segment is all the window holds —
+	 * there is no closed run to fall back to. */
+	rr_ledger_t *l2 = rr_ledger_create(30);
+	rr_ledger_seed(l2, "C:/buf/rrseg_00.mkv", 0);
+	assert(rr_ledger_boundary(l2, "C:/buf/rrseg_01.mkv", SEC(10)) == 0); /* ended, never released */
+	assert(!rr_window_select(l2, SEC(10), 300, 0, &w));
+	rr_ledger_destroy(l2);
+
+	/* Two held files above the run: both are skipped, the closed run below
+	 * is selected alone. */
+	rr_ledger_t *l3 = rr_ledger_create(30);
+	rr_ledger_seed(l3, "C:/buf/rrseg_00.mkv", 0);
+	assert(rr_ledger_boundary(l3, "C:/buf/rrseg_01.mkv", SEC(10)) == 0);
+	rr_ledger_mark_closed(l3, 0, MIB(40));
+	assert(rr_ledger_boundary(l3, "C:/buf/rrseg_02.mkv", SEC(20)) == 1); /* held */
+	assert(rr_ledger_boundary(l3, "C:/buf/rrseg_03.mkv", SEC(30)) == 2); /* held, open tail above */
+	assert(rr_window_select(l3, SEC(30), 300, 0, &w));
+	assert(w.first == 0);
+	assert(w.count == 1);
+	assert(rr_window_saved_end(l3, &w, 0) == SEC(10));
+	rr_ledger_destroy(l3);
+}
+
 static void window_inpoint_is_offset_into_first_segment(void)
 {
 	/* The buffer starts at 2 s: seed at 2 s, closed at 12/22/32 s. */
@@ -686,6 +772,7 @@ int main(void)
 	RUN(small_segment_is_kept);
 	RUN(window_selects_only_overlapping_closed_segments);
 	RUN(window_skips_segment_still_being_written);
+	RUN(window_selects_older_closed_run_past_held_newest);
 	RUN(window_inpoint_is_offset_into_first_segment);
 	RUN(window_larger_than_buffer_selects_everything_inpoint_zero);
 	RUN(since_last_save_moves_window_start);

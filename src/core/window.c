@@ -22,15 +22,25 @@ bool rr_window_select(const rr_ledger_t *l, uint64_t window_end_ns, int window_s
 	 * ledger index range (the caller pins and saves exactly that range).
 	 * A segment that ended but is not closed (its boundary release wait
 	 * failed, the file may still be written) ends the run — the footage
-	 * older than it is not saveable together with newer segments. */
+	 * older than it is not saveable together with newer segments. Above
+	 * the run, before anything is collected, such a segment is only
+	 * skipped: the closed run below it is hole-free footage whose save is
+	 * complete on its own, and the held file sits after the run's end, so
+	 * a full window of closed segments stays saveable while the newest
+	 * rotated file is still held by the muxer or a scanner. */
 	for (size_t i = n; i > 0; i--) {
 		struct rr_segment_info seg;
 		if (!rr_ledger_get(l, i - 1, &seg))
 			continue;
 		if (seg.end_ns == 0)
 			continue; /* the open tail segment: it has not ended yet */
-		if (!seg.closed || seg.end_ns <= start)
-			break; /* not released, or ended before the window: run over */
+		if (!seg.closed) {
+			if (count == 0)
+				continue; /* newest-ended not released: skip to the older run */
+			break;            /* unreleased hole inside the run: run over */
+		}
+		if (seg.end_ns <= start)
+			break; /* ended before the window: run over */
 		first = (int)(i - 1);
 		count++;
 	}

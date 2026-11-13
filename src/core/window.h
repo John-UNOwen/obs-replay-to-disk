@@ -2,7 +2,11 @@
  * Pure C: no libobs. Selection takes the contiguous index range of closed
  * segments whose end is after the window start, ending at the newest closed
  * segment, and computes the offset into the first one. A segment that ended
- * but is not yet closed (possibly still being written) ends the range.
+ * but is not yet closed (possibly still being written) ends the range below
+ * it; one above the range — newer than the newest closed segment, the usual
+ * just-rotated file a scanner holds — is skipped, not a refusal: the run
+ * under it is saveable on its own and the held footage, which starts after
+ * the run's end, stays ahead of every later boundary.
  * The caller pins the result with rr_ledger_pin while the save runs.
  * License: GPL-2.0-or-later.
  */

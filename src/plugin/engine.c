@@ -1269,6 +1269,18 @@ static void handle_save(void)
 				sel_count = w.count;
 
 				obs_log(LOG_INFO, "save started: segments=%d inpoint=%.2fs", w.count, w.inpoint_sec);
+				/* A just-rotated segment the muxer or a scanner still holds sits
+				 * above the selected run (rr_window_select skipped it): name it so
+				 * the save is not mistaken for covering that footage; the idle
+				 * release retry offers it to a later save. */
+				for (int i = w.first + w.count; (size_t)i < rr_ledger_count(s.ledger); i++) {
+					struct rr_segment_info hi;
+					if (rr_ledger_get(s.ledger, (size_t)i, &hi) && hi.path && hi.end_ns != 0 &&
+					    !hi.closed)
+						obs_log(LOG_WARNING,
+							"engine: save: %s is not released yet, saving the older closed run",
+							hi.path);
+				}
 				obs_log(LOG_WARNING,
 					"engine: while the buffer runs OBS cannot change its Video settings "
 					"(Settings > Video, AutoConfig, scene-collection remigrate): stop the buffer "
