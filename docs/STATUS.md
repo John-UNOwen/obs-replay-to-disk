@@ -571,8 +571,10 @@
 
 ## Post-checkup fixes on top of v0.1.0: 12 problems, all fixed — rig-verified 2026-11-13
 
-- Base and commits: `main` at `f8740ec` (the annotated tag `v0.1.0` stays on it,
-  not moved). One commit per problem, oldest first: `7f255b3` `8a3b395`
+- Base and commits: the fixes stack on `f8740ec` (the pre-checkup release
+  commit); the annotated tag `v0.1.0` was moved to the final commit of this
+  round, a docs-only follow-up, so the tag and `main` HEAD are the fixed build.
+  One commit per problem, oldest first: `7f255b3` `8a3b395`
   `f4096e1` `fbb4f32` `94b5319` `195da3c` `2fc5973` `6312155` `cc63dc2`
   `b6332eb` `9fc11f9` `2fd806c`, then docs commits: `1388e3d` (this box, the
   README profile-switch and folder/filename notes, the new

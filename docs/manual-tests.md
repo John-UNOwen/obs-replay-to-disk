@@ -1,6 +1,6 @@
 # Manual test checklist
 
-This checklist is for a human running OBS with a real scene or game. It reflects the build on `main` after the post-checkup fixes: the `v0.1.0` tag (`f8740ec`) plus the 12 fixes recorded in [STATUS.md](STATUS.md), built against OBS Studio 33.0.1 Windows x64 (obs-deps 2026-10-23). What was already machine-verified on the development rig (build gates, self-tests, the WP3/WP4 regression, memory-leak counts) is recorded in [STATUS.md](STATUS.md). Only what needs a person at the OBS window is listed here.
+This checklist is for a human running OBS with a real scene or game. It reflects the build on `main` after the post-checkup fixes: the `v0.1.0` tag sits on the final post-checkup commit (the 12 fixes are recorded in [STATUS.md](STATUS.md)), built against OBS Studio 33.0.1 Windows x64 (obs-deps 2026-10-23). What was already machine-verified on the development rig (build gates, self-tests, the WP3/WP4 regression, memory-leak counts) is recorded in [STATUS.md](STATUS.md). Only what needs a person at the OBS window is listed here.
 
 Install the plugin first (see the README). Work down the list and check a box when the line passes. If something fails, note which line failed and what OBS did, and copy the OBS log line (Help > Log Files > View Log Files).
 
