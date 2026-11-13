@@ -588,6 +588,14 @@ static bool start_session(const struct rr_config *cfg_in)
 		fail_start("could not create the buffer folder");
 		return false;
 	}
+	/* The output folder is created on demand like the buffer folder: the
+	 * preflight below measures free space on it, which reads 0 for a missing
+	 * folder and would refuse a perfectly writable drive, and every save
+	 * writes into it. */
+	if (os_mkdirs(cfg.output_dir) == MKDIR_ERROR) {
+		fail_start("could not create the output folder");
+		return false;
+	}
 	purge_buffer_dir(cfg.buffer_dir, true); /* stale segments of a killed run */
 	purge_part_files(cfg.output_dir);
 
