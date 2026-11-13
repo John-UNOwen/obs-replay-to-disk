@@ -41,6 +41,7 @@
 #define SEGMENT_SPLIT_SEC 10 /* D2 */
 
 #define RR_MAX_SAVE_SEGS 512                /* > 1800 s / 10 s + headroom */
+#define RR_PURGE_TOTAL_MS 5000              /* aggregate budget of one purge pass */
 #define RR_SAVE_FREE_MARGIN (256 << 20)     /* 5.6 step 6 */
 #define RR_SAVE_SPLIT_TIMEOUT_NS 3000000000ull /* 5.6 step 3: 3 s */
 #define RR_SAVE_DEFER_CAP 32                /* STOPs parked while draining (5.3) */
@@ -239,15 +240,27 @@ static bool same_drive(const char *a, const char *b)
 }
 
 /* D12: delete only files named rrseg_*.mkv. per_file logs each deletion.
- * A file the muxer still holds (crash leftover racing shutdown) is retried
- * for ~2 s; failures are logged, never fatal. Returns the delete count. */
-static int purge_buffer_dir(const char *dir, bool per_file)
+ * A file the muxer or another program still holds (backup/sync tools, media
+ * preview panes — anything opened without FILE_SHARE_DELETE) is retried for
+ * ~2 s, but the WHOLE pass shares one RR_PURGE_TOTAL_MS deadline: a buffer
+ * folder full of held files must not cost ~2 s times the file count on the
+ * stop/QUIT path, which shutdown then joins. Past the deadline every
+ * remaining file gets one delete attempt and is left behind with a warning;
+ * the next start retries them. Returns the delete count; when skipped is
+ * non-NULL it receives the count of files left behind. */
+static int purge_buffer_dir(const char *dir, bool per_file, int *skipped)
 {
+	if (skipped)
+		*skipped = 0;
+
 	os_dir_t *d = os_opendir(dir);
 	if (!d)
 		return 0;
 
+	const uint64_t deadline = os_gettime_ns() + (uint64_t)RR_PURGE_TOTAL_MS * 1000000ull;
+
 	int deleted = 0;
+	int left = 0;
 	struct os_dirent *de;
 	while ((de = os_readdir(d)) != NULL) {
 		if (de->directory || !rr_paths_is_segment_name(de->d_name))
@@ -267,6 +280,10 @@ static int purge_buffer_dir(const char *dir, bool per_file)
 				gone = true;
 				break;
 			}
+			/* Aggregate bound: past the deadline no more sleeping —
+			 * each remaining file still gets its one delete attempt. */
+			if (tries == 19 || os_gettime_ns() >= deadline)
+				break;
 			os_sleep_ms(100);
 		}
 		if (gone) {
@@ -274,10 +291,13 @@ static int purge_buffer_dir(const char *dir, bool per_file)
 			if (per_file)
 				obs_log(LOG_INFO, "engine: purged: %s", path);
 		} else {
+			left++;
 			obs_log(LOG_WARNING, "engine: could not delete %s", path);
 		}
 	}
 	os_closedir(d);
+	if (skipped)
+		*skipped = left;
 	return deleted;
 }
 
@@ -597,7 +617,7 @@ static bool start_session(const struct rr_config *cfg_in)
 		fail_start("could not create the output folder");
 		return false;
 	}
-	purge_buffer_dir(cfg.buffer_dir, true); /* stale segments of a killed run */
+	purge_buffer_dir(cfg.buffer_dir, true, NULL); /* stale segments of a killed run */
 	purge_part_files(cfg.output_dir);
 
 	/* 5.5 step 3: preflight (core/space). */
@@ -711,11 +731,17 @@ static void stop_session(bool force, bool stop_seen)
 	/* 5.7 step 3 */
 	release_session_objects();
 
-	/* 5.7 step 4: clear the ledger, purge (D12) */
+	/* 5.7 step 4: clear the ledger, purge (D12). The purge pass is
+	 * aggregate-bounded (RR_PURGE_TOTAL_MS): externally held segment files
+	 * are left behind, logged, and re-purged on the next start — they must
+	 * never extend stop/QUIT by 2 s per file. */
 	if (s.buffer_dir[0]) {
-		const int n = purge_buffer_dir(s.buffer_dir, false);
+		int skipped = 0;
+		const int n = purge_buffer_dir(s.buffer_dir, false, &skipped);
 		if (n > 0)
 			obs_log(LOG_INFO, "engine: purged %d segment file(s) on stop", n);
+		if (skipped > 0)
+			obs_log(LOG_WARNING, "engine: %d segment file(s) still held on stop, left in place", skipped);
 	}
 	if (s.ledger) {
 		rr_ledger_destroy(s.ledger);
@@ -1529,8 +1555,10 @@ void rr_engine_shutdown(void)
 	 * what "no thread of ours runs after unload" really requires — the
 	 * event only says worker_main signalled one return before exiting, and
 	 * it is skipped entirely when its os_event_init failed. The wait ends:
-	 * the QUIT path is self-bounded (force stop, rr_remux checks g_quit
-	 * per segment, purge gives up on locked files after ~2 s each). On the
+	 * the QUIT path is aggregate-bounded (force stop, rr_remux checks
+	 * g_quit per segment, purge gives up on locked files after ~2 s each
+	 * AND after ~5 s for the whole pass, RR_PURGE_TOTAL_MS), so this join
+	 * cannot park the UI thread for 2 s times the held-file count. On the
 	 * normal path the worker is already gone and this returns at once. */
 	if (g_thread && WaitForSingleObject(g_thread, INFINITE) == WAIT_OBJECT_0) {
 		CloseHandle(g_thread);
