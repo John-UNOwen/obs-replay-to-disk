@@ -251,7 +251,7 @@
     present during the runs; it was left untouched (all launches/kills/closes targeted
     only PIDs started by this WP).
 
-## WP4 save flow: core DONE — acceptance G not run (host wedged, see Open problems)
+## WP4 save flow: DONE — acceptance G PASS 2026-11-13 (host wedge cleared on its own)
 - Date: 2026-11-12
 - Commits: 103c14b 5324a7f 661577f 4a12229 (+ this status commit)
 - Acceptance (rig, `RR_SELFTEST=save`, encoder `obs_qsv11_v2` default CBR, media
@@ -295,10 +295,29 @@
     Run total: 4 prunes, 0 during SAVING. A dedicated 1800 s/150 kbps run for a longer
     pinned-backlog burst could not start (see Open problems); the pause + resume-after
     behavior is fully evidenced above.
-  - NOT RUN: close OBS during SAVING (WM_CLOSE) → exits cleanly ≤5 s, leaks line.
-    No OBS instance can finish startup on this host since ≈21:54 local (see Open
-    problems). The close-at-save recipe and scripts are in place
-    (`.testrig/scripts/start-save.ps1` + `close-at-save.ps1` + `wait-run.ps1`).
+  - PASS (run 2026-11-13 06:49-06:53, rig healthy again — see the RESOLVED note
+    under Open problems): close OBS via WM_CLOSE with the save flow live, the
+    scripted recipe (`start-save.ps1` + a scratch close script mirroring
+    `close-at-save.ps1`; window 30, `SAVES=55`, `REFERENCE=0`; runs
+    `wp4-G1/G2/G3`, PIDs 29152/6724/13712). Acceptance path (a) all three
+    times — the remux finished before the close could land (`took=0.05s`/`0.07s`
+    on hot cache is faster than any log-polling close: G2's `WM_CLOSE` went out
+    25 ms after `save finished`): G1 `save started: segments=4 inpoint=4.01s`
+    06:50:14.733 → `save finished: ...Replay_2026-11-13_06-50-14.mp4
+    frames=900 duration=30.00s took=0.07s warnings=0` 06:50:14.805 → WM_CLOSE
+    2.1 s later; G2 close at DelayMs=0, exit 0.22 s after WM_CLOSE; G3
+    (`BITRATE=150000` to widen the remux — qsv delivered ~19 Mbps, remux still
+    0.05 s) exit 0.24 s. No crash: each log ends clean —
+    `engine: quitting with the output active, forcing stop` / `engine: purged
+    7 segment file(s) on stop` / `buffer stopped` / `selftest finished: failed
+    interrupted (OBS exit)` (the watchdog's interruption reason) / `plugin
+    unloaded`; exit times 0.22 / 0.22 / 0.24 s (≤5 s). Leaks `1` in all three
+    = the stock-OBS control on the same config that morning (also 1), so the
+    plugin adds 0. Each run dir: exactly one final `Replay_*.mp4`,
+    `*.rrpart` count 0 (recursive); no retry beyond the three attempts was
+    needed. The (b) quit-flag cancel path stays unexercised at runtime (the
+    70 ms remux window is unreachable by log polling); E1 keeps the
+    kill-mid-remux evidence.
   - PASS (after the final state): zero-warning builds. `cmake --build --preset
     windows-x64 --config RelWithDebInfo`: exit 0, 0 warnings; CI posture
     (`build_check`, `CMAKE_COMPILE_WARNING_AS_ERROR=ON`): exit 0; stricter
@@ -328,7 +347,13 @@
     OBS keeps an open log flush-ambiguous while another `--multi` instance runs
     (newest-by-mtime picked the wrong instance's log).
 - Open problems:
-  - Acceptance G blocked by a host fault that started ≈21:54 local, after F finished:
+  - RESOLVED 2026-11-13, no reboot: the host wedge below cleared on its own.
+    The 06:45 probe (`.testrig/obs/config/obs-studio/logs/2026-11-13
+    06-45-23.txt`) showed the window after ~5 s and a clean WM_CLOSE exit on a
+    freshly rebuilt config (`Number of memory leaks: 0`); G and the WP5 load
+    smoke all ran normally at 06:47-06:53. Rig rule kept: one instance per
+    portable config at a time, closes only by WM_CLOSE to the saved PID.
+  - History — G was blocked by a host fault that started ≈21:54 local, after F finished:
     every new obs64 (with or without this plugin, fresh portable config, with or
     without `--multi`/`--minimize-to-tray`) hangs at the same point — the log ends at
     `Created scene collection 'Untitled' (clean, ...)` / `Loaded scenes` and the main
@@ -344,19 +369,34 @@
     carry-over).
 
 
-## WP5 user interface and hotkeys: DONE — manual acceptance PENDING (host wedge, see Acceptance)
+## WP5 user interface and hotkeys: DONE — load smoke PASS 2026-11-13; manual acceptance PENDING (owner)
 - Date: 2026-11-13
 - Commits: 1b604e0 (+ this status commit)
-- Acceptance (handoff WP5 is "manual, in the test rig"; every line is
-  OBS-window-dependent and no OBS instance can finish startup on this host —
-  the WP4 Open-problems wedge persists):
+- Acceptance (handoff WP5 is "manual, in the test rig"; the host wedge cleared
+  2026-11-13 (see the WP4 Open-problems RESOLVED note) and the load smoke below
+  ran on this host — the four click-through lines need a human at the OBS
+  window and stay owner-pending):
   - PENDING: Both hotkeys appear in Settings → Hotkeys, work, and still work
     after restarting OBS.
   - PENDING: Each setting survives an OBS restart.
   - PENDING: A buffer folder of `C:\` or the output folder is refused with a
     message.
   - PENDING: Start, Save and Stop work from the dialog; the status line follows.
-  - Re-verify recipe (post-reboot, next agent): (1) build, install per handoff
+  - PASS (agent, 2026-11-13): WP5 load smoke — main (code 1b604e0, HEAD
+    878dc14) built and installed per 7.1, loaded in the rig OBS with no
+    `RR_SELFTEST` in a fresh session (PID 23856, log `2026-11-13 06-47-05.txt`):
+    `[obs-replay-to-disk] plugin loaded successfully (version 0.1.0)` and
+    `[obs-replay-to-disk] avformat 62.12.102`, no plugin error lines (the log's
+    only failures are the stock host ones: aja/decklink/nvenc); WM_CLOSE →
+    `plugin unloaded`, `Number of memory leaks: 1` — a stock-OBS control run
+    (plugin DLL moved aside, same config, `2026-11-13 06-47-44.txt`) logs the
+    same `1`, so the plugin adds 0 leaks; the WP4-G runs show the same pair.
+    Rig fix on the way: the rig data folder held a stale root-level `en-US.ini`
+    (the 06:45 probe logged `Failed to load 'en-US' text for module:
+    'obs-replay-to-disk.dll'`); redeployed `data/` as
+    `data/obs-plugins/obs-replay-to-disk/locale/en-US.ini` and the line is gone
+    — locale strings (dialog labels, Tools item) will now render.
+  - Re-verify recipe (for the owner's manual run): (1) build, install per handoff
     7.1: DLL+PDB -> `.testrig/obs/obs-plugins/64bit/`, `data/` ->
     `.testrig/obs/data/obs-plugins/obs-replay-to-disk/`. (2) Launch with no
     `RR_SELFTEST` in the environment (fresh pwsh; the `.testrig/scripts`
@@ -430,8 +470,9 @@
   - All strings in `data/locale/en-US.ini` via `obs_module_text` (~45 keys);
     `PluginName` already read "Replay to Disk" (unchanged).
 - Open problems:
-  - The four acceptance lines are PENDING solely because of the host wedge;
-    the recipe above is the full post-reboot re-verify.
+  - The four acceptance lines are PENDING for a manual run at the OBS window
+    (the host wedge is gone — see the WP4 RESOLVED note and the load smoke);
+    the recipe above is the full re-verify.
   - `rr_settings_save` now has an in-app caller, but its write path runs for
     the first time inside the pending manual test (survive-restart box).
   - `rolling_replay_saved` still has no in-app subscriber (the UI refreshes
