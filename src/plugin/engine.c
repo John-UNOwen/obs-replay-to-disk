@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "engine.h"
 #include "platform-win.h"
@@ -42,6 +43,7 @@
 
 #define RR_MAX_SAVE_SEGS 512                /* > 1800 s / 10 s + headroom */
 #define RR_PURGE_TOTAL_MS 5000              /* aggregate budget of one purge pass */
+#define RR_PART_STALE_SECS 120              /* part-file purge safety window (5.6/D13) */
 #define RR_SAVE_FREE_MARGIN (256 << 20)     /* 5.6 step 6 */
 #define RR_SAVE_SPLIT_TIMEOUT_NS 3000000000ull /* 5.6 step 3: 3 s */
 #define RR_SAVE_DEFER_CAP 32                /* STOPs parked while draining (5.3) */
@@ -301,12 +303,25 @@ static int purge_buffer_dir(const char *dir, bool per_file, int *skipped)
 }
 
 /* D13: a crash can leave <final>.rrpart in the output folder; stale ones are
- * deleted at start. Only names ending in .rrpart are touched. */
+ * deleted at start. Only names ending in .rrpart are touched.
+ *
+ * "Stale" is judged by the last write, not by existence: this instance's
+ * start can share the output folder with a second OBS --multi whose save is
+ * in flight. Between that save's remux completing (part closed, no longer
+ * held open) and its exclusive rename, an unconditional unlink here deletes
+ * the finished part and that save's clip is lost. A live remux keeps the
+ * part's mtime current and the remux-end→rename gap is milliseconds, so a
+ * part written within RR_PART_STALE_SECS is kept (logged) and only older
+ * leftovers are deleted. Honest cost: a crashed run's leftover is purged no
+ * earlier than one window after its last write, and only by an instance
+ * that (re)starts — an idle instance purges nothing. */
 static void purge_part_files(const char *dir)
 {
 	os_dir_t *d = os_opendir(dir);
 	if (!d)
 		return;
+
+	const time_t now = time(NULL);
 
 	struct os_dirent *de;
 	while ((de = os_readdir(d)) != NULL) {
@@ -314,6 +329,15 @@ static void purge_part_files(const char *dir)
 			continue;
 		char path[RR_PATHLEN];
 		snprintf(path, sizeof(path), "%s\\%s", dir, de->d_name);
+
+		struct stat st;
+		if (os_stat(path, &st) != 0)
+			continue; /* vanished or unreadable: never delete what was not proven stale */
+		const long long age = (long long)(now - st.st_mtime);
+		if (age < RR_PART_STALE_SECS) { /* negative (future mtime) counts as fresh */
+			obs_log(LOG_INFO, "engine: part kept, written %lld s ago: %s", age, path);
+			continue;
+		}
 		if (os_unlink(path) == 0)
 			obs_log(LOG_INFO, "engine: removed stale part: %s", path);
 	}
