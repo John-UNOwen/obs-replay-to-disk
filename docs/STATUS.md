@@ -568,3 +568,214 @@
   `docs/manual-tests.md` on a real machine with a real game and report the
   NVENC/AMF/HDR results there; fix what fails and re-tag if needed.
   Done for v0.1.0 (handoff WP6) = every acceptance box PASS.
+
+## Post-checkup fixes on top of v0.1.0: 12 problems, all fixed — rig-verified 2026-11-13
+
+- Base and commits: `main` at `f8740ec` (the annotated tag `v0.1.0` stays on it,
+  not moved). One commit per problem, oldest first: `7f255b3` `8a3b395`
+  `f4096e1` `fbb4f32` `94b5319` `195da3c` `2fc5973` `6312155` `cc63dc2`
+  `b6332eb` `9fc11f9` `2fd806c`, then a docs commit (this box, the README
+  profile-switch and folder/filename notes, the new `docs/manual-tests.md`
+  profile box). Rig = the portable OBS 33.0.1 under `.testrig`, encoder
+  `obs_qsv11_v2`, 30/1 fps. OBS logs are the files under
+  `.testrig/obs/config/obs-studio/logs/`, run dirs under `.testrig/runs/`.
+  The rig config was reset mid-loop, so only runs from 12:19 on have a
+  surviving OBS log; an entry whose rig log is gone names what still proves it
+  (a unit test, the standalone repro, a run dir) and says the log is gone.
+- Gates re-run on the fixed tree (HEAD `2fd806c`, before this markdown-only
+  commit): `cmake --preset windows-x64` exit 0;
+  `cmake --build --preset windows-x64 --config RelWithDebInfo` exit 0 with 0
+  `: warning ` lines; `ctest --test-dir build_x64 -C RelWithDebInfo` →
+  `100% tests passed, 0 tests failed out of 2` (`core`, `rename`);
+  `cmake --build build_check --config RelWithDebInfo` (cache
+  `CMAKE_COMPILE_WARNING_AS_ERROR=ON`, C flags `/W4 /WX`) exit 0, 0 warnings;
+  `cmake --build build_w4 --config RelWithDebInfo` (C flags `/W4 /WX`) exit 0;
+  clang-format 19.1.1 `--dry-run -Werror` over the 25 files under `src/` exit 0;
+  gersemi 0.29.2 `--check CMakeLists.txt` exit 0.
+- Rig regression on the fixed build, WP3 buffer suite (run `chk-wp3`, log
+  `2026-11-13 12-41-23.txt`, `RR_SELFTEST=buffer WINDOW=30 RUN=120`):
+  `buffer started` 12:41:28.167, then 11 `segment closed` lines at 10.00 s
+  intervals within 3 ms after the first (`dur=11.47s`); first `pruned:`
+  12:42:29.676 = +61.5 s after start (6 prunes); `purged 6 segment file(s) on
+  stop` and `buffer stopped` 12:43:28.640; every watchdog tick `lagged=0`;
+  `selftest finished: ok buffer ran 120s`; `plugin unloaded`; the pre-placed
+  `keep-me.txt` is still in the buffer dir and 0 `rrseg_*.mkv` are left.
+- Rig regression, WP4 save suite (run `chk-wp4`, log `2026-11-13 12-44-09.txt`,
+  `RR_SELFTEST=save WINDOW=30 SAVES=20,60`): `save started: segments=2
+  inpoint=0.00s` 12:44:35.345 → `save finished: ...Replay_2026-11-13_12-44-35
+  .mp4 frames=600 duration=20.00s took=0.08s warnings=0`; `save started:
+  segments=3 inpoint=0.02s` 12:45:15.366 → `...12-45-15.mp4 frames=900
+  duration=30.00s took=0.11s warnings=0`. Both clips re-measured after the last
+  fix with the repo's own ffmpeg build: ffprobe format duration 20.032000 s
+  (band 19–21 s) and 30.000000 s (band 30.0–31.1 s); `ffmpeg -v warning -i
+  <clip> -map 0 -f null -` exit 0 with no output lines for both. Across all
+  `chk-*` run dirs: 0 `rrseg_*.mkv`, 0 `*.rrpart`. The packet-exact
+  `verify_remux.py` check could not be repeated: that script and its reference
+  were deleted after WP6 (see WP6 Deviations), so this box records the duration
+  and stream-clean measurement only.
+- 1. `save_drain` livelock (major). A `CMD_STOP` dequeued while waiting for the
+  split boundary went back into the same queue, so `q_count` never hit 0, the
+  3 s "no boundary" timeout (on the empty-queue side) never fired, and the
+  worker spun at 100 % CPU in SAVING; with a stalled muxer the user's Stop never
+  ran. Fix `7f255b3`: STOP/FORCE_STOP are parked in a local array outside the
+  queue (`RR_SAVE_DEFER_CAP`) and handed back after the drain ends
+  (`src/plugin/engine.c:1012-1018`, `1046-1049`), so the queue drains empty, the
+  loop sleeps on the queue event and the timeout branch is reachable again.
+  Verified by re-running the structural repro (the queue plus a standalone copy
+  of `save_drain`): the pre-fix build reports `[watchdog] t=5610ms
+  spin_iters=53704154` then `LIVELOCK: save_drain did not return within 6000 ms`
+  (exit 2); the fixed build logs `engine: save: no boundary within 3 s,
+  continuing with closed segments`, returns at 3000 ms with `spin_iters=0` and
+  the STOP re-queued (`RESULT: ok (timed out at the 3 s deadline, STOP re-queued
+  for when the save ends)`, exit 0); with a boundary at +1.2 s it returns at
+  1218 ms, `spin_iters=0`. The rig save-then-stop scenario, run `chk-stop2`
+  (`2026-11-13 12-51-37.txt`, WINDOW=600): `save started: segments=30`
+  12:56:41.300 → `save finished ... frames=8940 duration=298.00s took=1.02s
+  warnings=0` 12:56:42.319 → `purged 31 segment file(s) on stop` and
+  `buffer stopped` 12:56:43.354 → `final state=0`: the run's Stop was honored as
+  soon as the save was over and the state left SAVING; the clip is 298.026667 s.
+- 2. Unexpected OUTPUT_STOPPED cost 5–7 s (major). `handle_unexpected_stopped`
+  ran the graceful-stop sequence on an output libobs had already marked inactive,
+  and libobs emits no second `stop` signal, so both waits always expired —
+  STOPPING held for 5–7 s with two misleading warnings. Fix `8a3b395`:
+  `stop_session(force, stop_seen)` takes the already-arrived signal, and the
+  unexpected-death path passes `stop_seen=true` (engine.c:916-918).
+  Verified on the rig, run `chk-f2` (`2026-11-13 12-33-18.txt`, muxer child
+  killed while buffering): `buffer error: the output stopped unexpectedly
+  (code -8)` 12:33:36.042 → `purged 2 segment file(s) on stop` and
+  `buffer stopped` 12:33:36.051 (9 ms later), and 0 occurrences of
+  `graceful stop took over 5 s` or `the output never reported its stop signal`
+  anywhere in that log.
+- 3. Profile switch against a live save (major, B8/D16). PROFILE_CHANGING waited
+  a fixed 6 s and let the switch through anyway; with the shipped 1800 s default
+  a save outran it, OBS then failed the video reset (log
+  `Tried to reset when already active`) and silently kept the old video mode.
+  Fix `f4096e1`: `rr_engine_halt_for_video_reset` escalates within a bound —
+  stop (6 s), cancel the running save (12 s more), force the stop (15 s more),
+  33 s in total (engine.c:48-56, 1610-1657; plugin-main.c:402-414 calls it).
+  Verified on the rig, run `chk-f3` (`2026-11-13 12-34-14.txt`, save-mode with
+  WINDOW=600, save at t=400 s): `save started: segments=40 inpoint=0.00s`
+  12:41:00.195 → `engine: video reset: cancelling the in-flight save`
+  12:41:00.303 → `engine: save cancelled (a video reset asked for it)` and
+  `save failed: cancelled` 12:41:00.318 → `purged 41 segment file(s) on stop`
+  and `buffer stopped` 12:41:00.889; OBS then logged `video settings reset: ...
+  output resolution: 852x480` (the new profile's value, the session had started
+  at 1280x720) and `Switched to profile 'RigB'` at 12:41:00.919 / .928, and the
+  log has 0 `Tried to reset when already active` lines. `.testrig/runs/chk-f3/out`
+  holds 0 files: the cancelled save left no clip and no part file.
+- 4. A segment was marked closed although the 2 s exclusive-open wait proved the
+  muxer still held it (major): it entered save selection and prune, and a save
+  that read only the valid prefix logged as clean (`warnings=0`) with the tail
+  silently missing. Fix `fbb4f32`: on a failed probe the segment stays NOT closed
+  (engine.c:877-891), window selection refuses to run past a segment that ended
+  but is not closed (`src/core/window.c:21-32`, `window.h:5`), and the idle tick
+  re-probes and closes it once the release really happens
+  (`retry_segment_releases`, engine.c:1327). Verified by the unit test
+  `window_skips_segment_still_being_written` (`tests/test_core.c:620`, passing
+  in the ctest run above); the hold experiment run dirs `.testrig/runs/f4held`,
+  `f4held2` survive, their OBS log does not.
+- 5. `filename_format` could write the save outside the output folder (minor
+  after red team): `os_generate_formatted_filename` keeps `/` and `\`, and the
+  dialog's Filename field was never validated. Fix `94b5319`:
+  `rr_paths_is_safe_filename` (core/paths.c:242) rejects `/`, `\`, `:`, `.` and
+  `..`; Apply refuses such a format (`Error.FilenameFormat`), and the engine
+  re-checks the generated name and falls back to the default format with a
+  warning log (engine.c:1073-1083). Verified by the unit test
+  `save_filename_must_be_bare` and on the rig, run `fx5-escape`: with the
+  escaping format configured, the only finished file is inside the output folder
+  under the default-format name (`.testrig/runs/fx5-escape/out/
+  Replay_2026-11-13_11-42-20.mp4`), nothing above it; that run's OBS log is gone.
+- 6. Worker not joined before the DLL was unmapped (minor). After the 10 s wait
+  timed out, `rr_engine_shutdown` returned and OBS unmapped the DLL; the
+  once-only guard also made the unload-time call return instantly, and a null
+  `g_done_ev` skipped the wait entirely. Fix `195da3c`: the QUIT request stays
+  once-only, but every call joins — `WaitForSingleObject(g_thread, INFINITE)`
+  then `CloseHandle` (engine.c:1503-1530) — which is bounded by the QUIT path
+  itself (force stop, per-segment cancel checks, bounded purge retries).
+  Verified: every surviving rig run ends `buffer stopped` → `plugin unloaded`
+  with no hang (12:19–12:56 logs); the timeout branch itself needs >10 s of
+  stacked stalls at exit and was not reproduced.
+- 7. The buffer==output rule was a raw string compare (minor): `C:\rec\..\rec`
+  passed against `C:\rec`. Fix `2fc5973`: `paths_canonicalize`
+  (`src/core/paths.c:80`, GetFullPathNameW with a manual fallback) folds `.`,
+  `..`, repeated separators and slash style before the equality, absolute and
+  drive-root checks. Verified by the unit test
+  `buffer_dir_dot_segments_are_folded` (`tests/test_core.c:628`).
+- 8. `output_dir` was never validated (minor): a relative value resolved against
+  the OBS working directory (including the stale `*.rrpart` purge there), a drive
+  root swept a whole volume. Fix `6312155`: `rr_paths_check_output_dir`
+  (core/paths.c:195 — empty means the OBS recording path, otherwise absolute and
+  not a drive root) applied at settings load (an unusable value falls back to the
+  recording path with a warning, `src/plugin/settings.c:142-151`), at dialog
+  Apply (`Error.OutputDriveRoot`, `Error.OutputRelative`) and at buffer start
+  (engine.c:575-587). Verified by the unit test
+  `output_dir_absolute_not_drive_root` (`tests/test_core.c:629`).
+- 9. The save rename replaced an existing file (minor): `os_stat` then
+  `os_rename`, and `os_rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`,
+  so a same-named file created in the gap was lost instead of the save taking a
+  `_2` suffix. Fix `cc63dc2`: new `src/plugin/rename.c` `rr_rename_exclusive`
+  (no `REPLACE_EXISTING`, 1 = target exists, libobs-free so tests link it) and
+  the save walks the `_N` suffixes on refusal, logging which name it used
+  (engine.c:1106-1141). Verified by the new ctest `rename`
+  (`tests/test_rename.c`: `moves_a_file_when_the_target_is_free`,
+  `refuses_an_existing_target_without_clobber`, `fails_on_a_missing_source`),
+  passing in the run above.
+- 10. A configured output folder that did not exist refused the start with a
+  misleading `not enough free disk ... output drive 0 MB` (minor): the preflight
+  measures free space there and a missing folder measures 0. Fix `b6332eb`:
+  `os_mkdirs(cfg.output_dir)` before the preflight, with its own failure message
+  (engine.c:592-599). Verified: the root cause re-measured with the same Win32
+  call (`GetDiskFreeSpaceExW` on a missing path → ok 0, 0 bytes; on an existing
+  path → ok 1, 59470663680 bytes), so the preflight can no longer see a missing
+  folder. The rig run that typed a nonexistent Output folder (12:14) left no
+  surviving OBS log.
+- 11. Engine entry points callable during shutdown (minor): OBS 33 has no
+  `proc_handler_remove`, so the global `rolling_replay_save()` proc stays
+  callable until the instant before the DLL is unmapped, and the worker and its
+  queues are already gone by then. Fix `9fc11f9`: `g_shutting_down` is set
+  before anything else in `rr_engine_shutdown` (engine.c:1485-1498) and
+  start/stop/save/wait_off/get_status return at once, logging
+  `START ignored (shutting down)` / `SAVE ignored (shutting down)` where a caller
+  asked for something (engine.c:1533-1540, 1562-1569, 1601-1608, 1659-1666);
+  `enqueue_cmd` itself stays open for the shutdown's own QUIT and the critical
+  sections are never deleted. Verified: smoke run `fix11-smoke`
+  (`2026-11-13 12-19-58.txt`) unaffected (buffer 30 s, `selftest finished: ok`,
+  `plugin unloaded`), and the QUIT path still runs through the guard — run
+  `chk-wp4`'s first attempt (`2026-11-13 12-43-52.txt`) logs
+  `engine: quitting with the output active, forcing stop` 12:44:04.571 →
+  `purged 1 segment file(s) on stop` → `buffer stopped` → `plugin unloaded`.
+  No run had a late call through the proc, so that last instant stays
+  open-in-principle, as the checkup filed it.
+- 12. Video settings while the buffer runs (minor): OBS resets video from
+  Settings > Video Apply, the Advanced tab, the AutoConfig wizard and a
+  scene-collection remigrate without emitting a frontend event, so the plugin
+  cannot step aside and OBS gives up quietly. Fix `2fd806c` is mitigation and
+  documentation, not a repair: the engine logs
+  `engine: while the buffer runs OBS cannot change its Video settings
+  (Settings > Video, AutoConfig, scene-collection remigrate): stop the buffer
+  first` at buffer start and at save start (engine.c:667-668, 1225-1228), the
+  README states the limit under Known limits, and `docs/manual-tests.md` has a
+  box for it. Verified on the rig, runs `fix12-buffer`
+  (`2026-11-13 12-25-01.txt`, the line right after `buffer started`
+  12:25:07.384) and `fix12-save` (`2026-11-13 12-25-47.txt`, after
+  `buffer started` 12:25:53.079 and again after `save started` 12:26:13.577).
+- Docs in this last commit, for the behaviour that changed:
+  - README Known limits: the profile-switch sentence was wrong. It claimed the
+    plugin "stops the buffer before the switch and restarts it after", but the
+    restart only happens with Autostart on, which is off by default
+    (`src/plugin-main.c:416-421`, `src/plugin/settings.c:28`; README settings
+    table already said so). It now says the switch is bounded at 33 s and states
+    the new user-visible behaviour: a profile switch cancels a save that is
+    running, so no MP4 and no part file appear.
+  - README settings table: the Output folder row now records that the folder is
+    created at buffer start and may not be a drive root (fixes 8, 10); the
+    Filename format row that `/`, `\` and `:` are not accepted, and that a
+    hand-edited format producing them falls back to the default (fix 5).
+  - `docs/manual-tests.md`: the "cannot change Video settings" box no longer
+    claims a profile switch "stops and restarts the buffer"; a new box walks a
+    profile switch while buffering and while saving, with the log lines to look
+    for. The header now says the checklist is for the post-fix build.
+- Left open by design: the OBS-side video reset with no frontend event (item 12)
+  is not fixable from the plugin; `docs/manual-tests.md` and the README carry it
+  as a limitation. `verify_remux.py` is not in the repo, so the packet-exact save
+  check is not repeatable here (see WP6 Deviations).

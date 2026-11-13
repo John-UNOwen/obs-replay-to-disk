@@ -35,8 +35,8 @@ Everything is set in the dialog. The values are stored in `settings.json` in OBS
 | Buffer length | 30 min | 30 s to 30 min |
 | Save scope | Full window | or: only footage since the previous save |
 | Buffer folder | OBS recording folder + `/.rolling-replay-buffer` | the plugin only ever deletes its own `rrseg_*.mkv` files here |
-| Output folder | OBS recording folder | where `Replay_*.mp4` files are written |
-| Filename format | `Replay_%CCYY-%MM-%DD_%hh-%mm-%ss` | OBS's filename format codes |
+| Output folder | OBS recording folder | where `Replay_*.mp4` files are written; created at buffer start if missing, and it cannot be a drive root |
+| Filename format | `Replay_%CCYY-%MM-%DD_%hh-%mm-%ss` | OBS's filename format codes, with no `/`, `\` or `:`; a hand-edited format that still produces such a name falls back to this default |
 | Video encoder | Automatic | first available of NVENC H.264, AMD HW H.264, Quick Sync H.264, x264; or pick any available H.264, HEVC or AV1 encoder |
 | Rate control | CBR | CBR or constant quality (VBR is deliberately not offered, it is ignored by OBS's x264) |
 | Bitrate | 30000 kbps | 1000 to 150000 |
@@ -70,7 +70,7 @@ A full save reads and writes the whole buffer once. In rig tests a full-window s
 - Only Quick Sync (Intel) has been machine-tested for the encoder path. NVENC and AMD AMF are supported in the settings and follow the same code path, but are untested; see [docs/manual-tests.md](docs/manual-tests.md).
 - HDR is best-effort and untested.
 - A/V sync, long saves, low-disk behavior and player compatibility still need a human run through [docs/manual-tests.md](docs/manual-tests.md). Everything that was checked on the development rig is recorded in [docs/STATUS.md](docs/STATUS.md).
-- OBS cannot change its video settings while the buffer runs. The video reset OBS needs fails against the buffer, and OBS gives up quietly: it keeps running at the old resolution and frame rate while storing the new values for the next start, and the log gets a "Tried to reset when already active" line. A change can land during buffering through a Settings window opened before the buffer started, the Advanced tab, the AutoConfig Wizard, or a scene-collection remigrate (the remigrate refuses with a "Reset not possible" box). Stop the buffer, change the setting, then start the buffer again. Switching profiles is handled: the plugin stops the buffer before the switch and restarts it after.
+- OBS cannot change its video settings while the buffer runs. The video reset OBS needs fails against the buffer, and OBS gives up quietly: it keeps running at the old resolution and frame rate while storing the new values for the next start, and the log gets a "Tried to reset when already active" line. A change can land during buffering through a Settings window opened before the buffer started, the Advanced tab, the AutoConfig Wizard, or a scene-collection remigrate (the remigrate refuses with a "Reset not possible" box). Stop the buffer, change the setting, then start the buffer again. Switching profiles is the one change OBS does make while the buffer runs, and the plugin steps aside for it: it stops the buffer before the new profile is applied, bounded at 33 s (a stop, then cancelling a running save, then a forced stop). A save still running when you switch profiles is cancelled: the log gets a "save failed: cancelled" line, with no MP4 and no part file. After the switch the buffer stays stopped unless you turned Autostart on (off by default), so start it again yourself.
 
 ## Building
 
