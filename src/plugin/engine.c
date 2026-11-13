@@ -1105,7 +1105,10 @@ static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
 
 /* Strip the ".mp4" of a final path into `stem` (D13 suffix policy: the
  * candidates are "<stem>_N.mp4", N from 2). False when final_path does not
- * end in ".mp4". Shared by build_final_path and rename_part_exclusive. */
+ * end in ".mp4". The stem is the one anchor of the suffix sequence:
+ * build_final_path derives it once from the generated name and hands it,
+ * with the next index, to rename_part_exclusive, so both passes walk the
+ * same sequence. */
 static bool mp4_stem(const char *final_path, char *stem, size_t sz)
 {
 	snprintf(stem, sz, "%s", final_path);
@@ -1116,6 +1119,16 @@ static bool mp4_stem(const char *final_path, char *stem, size_t sz)
 	return true;
 }
 
+/* The advisory pass claims nothing: a name counts as taken when os_stat
+ * resolves it, and any stat error treats it as free (as the old inline
+ * suffix loop did). */
+static int claim_if_free(void *user, const char *candidate)
+{
+	struct stat st;
+	(void)user;
+	return os_stat(candidate, &st) == 0 ? 1 : 0;
+}
+
 /* 5.6 step 7: final path from the filename format, with _2/_3/… suffixes
  * while the plain name exists (D13's rename target). The generated name must
  * be a bare file name (core/paths): os_generate_formatted_filename does not
@@ -1123,8 +1136,12 @@ static bool mp4_stem(const char *final_path, char *stem, size_t sz)
  * then escape the output folder. An unsafe name falls back to the default
  * format with a warning. This stat pass is only advisory (the name is needed
  * before the part file is written); rename_part_exclusive below enforces
- * no-clobber at the rename itself. */
-static bool build_final_path(const char *out_dir, const char *fmt, char *final_path, size_t sz)
+ * no-clobber at the rename itself. Both passes share the walk in
+ * core/paths (rr_paths_take_suffix): on success `stem` is the bare stem of
+ * the chosen name and `next_n` the first index the walk did not use, so the
+ * rename pass continues the very same sequence. */
+static bool build_final_path(const char *out_dir, const char *fmt, char *final_path, size_t sz, char *stem,
+			     size_t stem_sz, int *next_n)
 {
 	char *fname = os_generate_formatted_filename("mp4", false, fmt);
 	if (fname && !rr_paths_is_safe_filename(fname)) {
@@ -1140,22 +1157,27 @@ static bool build_final_path(const char *out_dir, const char *fmt, char *final_p
 	snprintf(final_path, sz, "%s\\%s", out_dir, fname);
 	bfree(fname);
 
+	if (!mp4_stem(final_path, stem, stem_sz))
+		return false;
+	*next_n = RR_SUFFIX_N_FIRST;
+
 	struct stat st;
 	if (os_stat(final_path, &st) != 0)
-		return true;
+		return true; /* plain name free; the rename walk starts at _2 */
 
-	char stem[RR_PATHLEN];
-	if (!mp4_stem(final_path, stem, sizeof(stem)))
-		return false;
-	for (int n = 2; n < 1000; n++) {
-		char cand[RR_PATHLEN + 8];
-		snprintf(cand, sizeof(cand), "%s_%d.mp4", stem, n);
-		if (os_stat(cand, &st) != 0) {
-			snprintf(final_path, sz, "%s", cand);
-			return true;
-		}
-	}
-	return false;
+	char cand[RR_PATHLEN + 8];
+	if (!rr_paths_take_suffix(stem, RR_SUFFIX_N_FIRST, claim_if_free, NULL, cand, sizeof(cand), next_n))
+		return false; /* _2…_999 all exist */
+	snprintf(final_path, sz, "%s", cand);
+	(*next_n)++; /* the rename walk continues after this pick */
+	return true;
+}
+
+/* Each candidate is claimed atomically: rr_rename_exclusive moves the part
+ * file onto a free name and reports "taken" (1) without touching anything. */
+static int claim_by_rename(void *user, const char *candidate)
+{
+	return rr_rename_exclusive((const char *)user, candidate);
 }
 
 /* 5.6 step 7 rename (D13, no-clobber): the name was chosen before the remux,
@@ -1163,9 +1185,11 @@ static bool build_final_path(const char *out_dir, const char *fmt, char *final_p
  * create that exact name while the part file is written. os_rename would
  * silently replace it (MoveFileExW with MOVEFILE_REPLACE_EXISTING), so the
  * rename itself must refuse an existing target: rr_rename_exclusive is the
- * race-free existence check, and on refusal the save walks the _N suffixes
- * like build_final_path does. On success final_path holds the name used. */
-static bool rename_part_exclusive(const char *part_path, char *final_path, size_t sz)
+ * race-free existence check, and on refusal the save continues the _N
+ * sequence build_final_path started — same bare stem, from next_n on — so a
+ * taken "_2" lands on "_3", never on a chained "_2_2". On success final_path
+ * holds the name used. */
+static bool rename_part_exclusive(const char *part_path, char *final_path, size_t sz, const char *stem, int next_n)
 {
 	int rn = rr_rename_exclusive(part_path, final_path);
 	if (rn == 0)
@@ -1175,23 +1199,13 @@ static bool rename_part_exclusive(const char *part_path, char *final_path, size_
 
 	char taken[RR_PATHLEN];
 	snprintf(taken, sizeof(taken), "%s", final_path);
-	char stem[RR_PATHLEN];
-	if (!mp4_stem(taken, stem, sizeof(stem)))
-		return false;
 
-	for (int n = 2; n < 1000; n++) {
-		char cand[RR_PATHLEN + 8];
-		snprintf(cand, sizeof(cand), "%s_%d.mp4", stem, n);
-		rn = rr_rename_exclusive(part_path, cand);
-		if (rn == 0) {
-			obs_log(LOG_INFO, "engine: save: %s appeared while saving, wrote to %s instead", taken, cand);
-			snprintf(final_path, sz, "%s", cand);
-			return true;
-		}
-		if (rn < 0)
-			return false;
-	}
-	return false;
+	char cand[RR_PATHLEN + 8];
+	if (!rr_paths_take_suffix(stem, next_n, claim_by_rename, (void *)part_path, cand, sizeof(cand), NULL))
+		return false;
+	obs_log(LOG_INFO, "engine: save: %s appeared while saving, wrote to %s instead", taken, cand);
+	snprintf(final_path, sz, "%s", cand);
+	return true;
 }
 
 static void handle_save(void)
@@ -1239,6 +1253,8 @@ static void handle_save(void)
 	char rerr[256] = "";
 	struct rr_remux_result res = {0};
 	char final_path[RR_PATHLEN] = "";
+	char final_stem[RR_PATHLEN] = ""; /* build_final_path's suffix anchor */
+	int final_next_n = RR_SUFFIX_N_FIRST;
 
 	/* Steps 4-5: window, selection, pins */
 	if (window_end == 0) {
@@ -1299,7 +1315,8 @@ static void handle_save(void)
 					snprintf(rerr, sizeof(rerr), "the output drive lacks room for %lld MB",
 						 (long long)(need / (1024 * 1024)));
 				} else if (!build_final_path(s.output_dir, s.cfg.filename_format, final_path,
-							     sizeof(final_path))) {
+							     sizeof(final_path), final_stem, sizeof(final_stem),
+							     &final_next_n)) {
 					snprintf(rerr, sizeof(rerr), "could not build an output file name");
 				} else {
 					/* Step 7: rr_remux to <final>.rrpart (D13);
@@ -1321,7 +1338,8 @@ static void handle_save(void)
 					const double took_s = (double)(os_gettime_ns() - t0) / 1e9;
 
 					ok = (rr_ret == 0);
-					if (ok && !rename_part_exclusive(part_path, final_path, sizeof(final_path))) {
+					if (ok && !rename_part_exclusive(part_path, final_path, sizeof(final_path),
+									 final_stem, final_next_n)) {
 						ok = false;
 						snprintf(rerr, sizeof(rerr), "could not rename the part file");
 					}

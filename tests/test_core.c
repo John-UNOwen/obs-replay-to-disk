@@ -845,6 +845,63 @@ static void save_filename_must_be_bare(void)
 	assert(rr_paths_is_safe_filename("CONSOLE.mp4"));
 }
 
+/* The D13 suffix policy is ONE sequence: the advisory name pick and the
+ * exclusive rename run the same rr_paths_take_suffix over the same bare stem,
+ * the rename pass starting where the advisory pass left off. */
+static int claim_if_taken(void *user, const char *candidate)
+{
+	const char *const *taken = (const char *const *)user;
+	for (int i = 0; taken[i]; i++) {
+		if (strcmp(taken[i], candidate) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+static int claim_error(void *user, const char *candidate)
+{
+	(void)user;
+	(void)candidate;
+	return -1;
+}
+
+static void save_suffix_walk_continues_the_sequence(void)
+{
+	char out[256];
+	int used;
+
+	/* A fresh walk starts at _2 and skips taken names. */
+	const char *const taken12[] = {"C:\\out\\Replay.mp4", "C:\\out\\Replay_2.mp4", NULL};
+	assert(rr_paths_take_suffix("C:\\out\\Replay", RR_SUFFIX_N_FIRST, claim_if_taken, (void *)taken12, out,
+				    sizeof(out), &used));
+	assert(strcmp(out, "C:\\out\\Replay_3.mp4") == 0);
+	assert(used == 3);
+
+	/* The checkup round-2 composition: the advisory pass picked _2, so the
+	 * rename walk continues from 3, and _2 reappeared mid-remux. It must
+	 * land on _3 — the old rename pass derived its stem from the suffixed
+	 * chosen name and produced "Replay_2_2". */
+	const char *const reappeared2[] = {"C:\\out\\Replay_2.mp4", NULL};
+	assert(rr_paths_take_suffix("C:\\out\\Replay", 3, claim_if_taken, (void *)reappeared2, out, sizeof(out),
+				    &used));
+	assert(strcmp(out, "C:\\out\\Replay_3.mp4") == 0);
+	assert(used == 3);
+
+	/* first_n below the policy's first number is clamped up to it. */
+	assert(rr_paths_take_suffix("C:\\out\\Replay", 0, claim_if_taken, (void *)taken12, out, sizeof(out), &used));
+	assert(strcmp(out, "C:\\out\\Replay_3.mp4") == 0);
+
+	/* Past the last number, or with no room for a candidate: nothing. */
+	assert(!rr_paths_take_suffix("C:\\out\\Replay", RR_SUFFIX_N_LAST + 1, claim_if_taken, NULL, out, sizeof(out),
+				     NULL));
+	char small[10];
+	assert(!rr_paths_take_suffix("C:\\out\\Replay", RR_SUFFIX_N_FIRST, claim_if_taken, NULL, small, sizeof(small),
+				     NULL));
+
+	/* A hard error stops the walk. */
+	assert(!rr_paths_take_suffix("C:\\out\\Replay", RR_SUFFIX_N_FIRST, claim_error, NULL, out, sizeof(out), NULL));
+}
+
 static void window_seconds_clamped_30_1800(void)
 {
 	assert(rr_settings_clamp_window_sec(10) == 30);
@@ -885,6 +942,7 @@ int main(void)
 	RUN(output_dir_absolute_not_drive_root);
 	RUN(segment_name_pattern);
 	RUN(save_filename_must_be_bare);
+	RUN(save_suffix_walk_continues_the_sequence);
 	RUN(window_seconds_clamped_30_1800);
 
 	printf("all tests passed\n");

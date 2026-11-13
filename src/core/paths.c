@@ -4,6 +4,7 @@
 #include "paths.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 
 static bool is_sep(char c)
@@ -391,4 +392,28 @@ bool rr_paths_is_part_name(const char *file_name)
 			return false;
 	}
 	return true;
+}
+
+bool rr_paths_take_suffix(const char *stem, int first_n, rr_suffix_claim_fn claim, void *user, char *out, size_t sz,
+			  int *used_n)
+{
+	if (!stem || !claim || !out || sz == 0)
+		return false;
+	if (first_n < RR_SUFFIX_N_FIRST)
+		first_n = RR_SUFFIX_N_FIRST;
+
+	for (int n = first_n; n <= RR_SUFFIX_N_LAST; n++) {
+		const int w = snprintf(out, sz, "%s_%d.mp4", stem, n);
+		if (w < 0 || (size_t)w >= sz)
+			return false; /* no room for this candidate (or for any larger N) */
+		const int r = claim(user, out);
+		if (r == 0) {
+			if (used_n)
+				*used_n = n;
+			return true;
+		}
+		if (r < 0)
+			return false; /* hard error: stop, do not keep trying names */
+	}
+	return false; /* every N up to RR_SUFFIX_N_LAST is taken */
 }

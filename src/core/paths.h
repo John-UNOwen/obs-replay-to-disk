@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,23 @@ enum rr_path_error rr_paths_check_output_dir(const char *output_dir);
 
 bool rr_paths_is_segment_name(const char *file_name); /* "rrseg_*.mkv" only */
 bool rr_paths_is_part_name(const char *file_name);    /* "*.rrpart" only */
+
+enum { RR_SUFFIX_N_FIRST = 2, RR_SUFFIX_N_LAST = 999 };
+
+/* One walk of the D13 save-suffix policy "<stem>_N.mp4", N from 2. The save
+ * runs it twice — the advisory name pick before the remux, and the exclusive
+ * rename walk after it — so the passes must continue one sequence over the
+ * same bare stem: the rename pass starts at the first N the advisory pass
+ * did not use, so an already chosen "_2" that gets taken mid-remux continues
+ * at "_3" and never chains into "_2_2". claim(user, candidate) attempts to
+ * take a candidate: 0 = claimed, 1 = the name is taken (walk on), negative =
+ * hard error (stop). Returns true when a candidate was claimed; `out` holds
+ * the path and, if not NULL, `used_n` its number. False when every number
+ * up to RR_SUFFIX_N_LAST is taken, `claim` reports an error, or `out` cannot
+ * hold a candidate. first_n below RR_SUFFIX_N_FIRST is clamped up to it. */
+typedef int (*rr_suffix_claim_fn)(void *user, const char *candidate);
+bool rr_paths_take_suffix(const char *stem, int first_n, rr_suffix_claim_fn claim, void *user, char *out, size_t sz,
+			  int *used_n);
 
 /* True when name is a valid Windows file name for the output folder: no '/'
  * or '\\' (would escape the folder), no ':' (drive prefix or NTFS stream),
