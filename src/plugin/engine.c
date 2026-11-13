@@ -567,6 +567,22 @@ static bool start_session(const struct rr_config *cfg_in)
 		fail_start(msg);
 		return false;
 	}
+	/* The output folder carries the same rules: the stale-part purge below
+	 * and every save write path act on exactly this string, so a relative
+	 * value would sweep and write in the process working directory and a
+	 * drive root would do it to a whole volume. */
+	const enum rr_path_error oerr = rr_paths_check_output_dir(cfg.output_dir);
+	if (!cfg.output_dir[0] || oerr != RR_PATH_OK) {
+		char msg[192];
+		if (!cfg.output_dir[0])
+			snprintf(msg, sizeof(msg), "output folder is not configured (no OBS recording path)");
+		else if (oerr == RR_PATH_DRIVE_ROOT)
+			snprintf(msg, sizeof(msg), "output folder is a drive root");
+		else
+			snprintf(msg, sizeof(msg), "output folder is not an absolute path");
+		fail_start(msg);
+		return false;
+	}
 	if (os_mkdirs(cfg.buffer_dir) == MKDIR_ERROR) {
 		fail_start("could not create the buffer folder");
 		return false;

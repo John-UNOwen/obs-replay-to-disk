@@ -192,6 +192,26 @@ enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char 
 	return RR_PATH_OK;
 }
 
+enum rr_path_error rr_paths_check_output_dir(const char *output_dir)
+{
+	/* Empty = "the OBS recording path", resolved by the caller. */
+	if (!output_dir || !output_dir[0])
+		return RR_PATH_OK;
+	if (!path_is_absolute(output_dir))
+		return RR_PATH_NOT_ABSOLUTE;
+
+	/* Same canonical spelling as the buffer check, so a folder that folds
+	 * away ("D:\videos\..") cannot pass as anything but the drive root it
+	 * is. */
+	char canon[RR_PATH_CANON_MAX];
+	const char *out = canon;
+	if (!paths_canonicalize(canon, sizeof(canon), output_dir))
+		out = output_dir;
+	if (path_is_drive_root(out))
+		return RR_PATH_DRIVE_ROOT;
+	return RR_PATH_OK;
+}
+
 /* Basenames only: any slash makes it not a file name. Prefix and extension are
  * matched exactly (D12/D13 always produce lower case). */
 bool rr_paths_is_segment_name(const char *file_name)

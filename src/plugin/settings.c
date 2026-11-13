@@ -2,6 +2,7 @@
  * License: GPL-2.0-or-later.
  */
 #include <obs-module.h>
+#include <plugin-support.h> /* obs_log (template helper) */
 #include <util/bmem.h>
 #include <util/platform.h>
 
@@ -9,6 +10,7 @@
 #include <string.h>
 
 #include "settings.h"
+#include "core/paths.h"
 #include "core/settings-clamp.h"
 
 /* 5.8 ranges */
@@ -136,6 +138,17 @@ void rr_settings_load(struct rr_config *cfg)
 	obs_data_release(data);
 
 	rr_settings_clamp(cfg); /* clamp on load (5.8) */
+
+	/* An output folder that cannot name a folder (relative, or a drive
+	 * root) is dropped back to the OBS recording-path default: the engine
+	 * purges stale "*.rrpart" files and writes saves in whatever this
+	 * string is, so a hand-edited settings.json must not move them. */
+	if (rr_paths_check_output_dir(cfg->output_dir) != RR_PATH_OK) {
+		obs_log(LOG_WARNING,
+			"settings: output folder '%.512s' is not usable, falling back to the OBS recording path",
+			cfg->output_dir);
+		cfg->output_dir[0] = 0;
+	}
 }
 
 bool rr_settings_save(const struct rr_config *cfg)

@@ -520,6 +520,35 @@ static void buffer_dir_dot_segments_are_folded(void)
 	assert(rr_paths_check_buffer_dir("\\\\server", "C:\\out") == RR_PATH_OK);
 }
 
+static void output_dir_absolute_not_drive_root(void)
+{
+	/* Empty means "the OBS recording path", resolved by the caller. */
+	assert(rr_paths_check_output_dir("") == RR_PATH_OK);
+	assert(rr_paths_check_output_dir(NULL) == RR_PATH_OK);
+
+	/* Ordinary folders, in every accepted spelling. */
+	assert(rr_paths_check_output_dir("C:\\Users\\<username>\\Record") == RR_PATH_OK);
+	assert(rr_paths_check_output_dir("D:/videos/.rr-out") == RR_PATH_OK);
+	assert(rr_paths_check_output_dir("\\\\server\\share\\record") == RR_PATH_OK);
+	assert(rr_paths_check_output_dir("/home/user/record") == RR_PATH_OK);
+
+	/* A drive root would be purged and written into as if it were a folder. */
+	assert(rr_paths_check_output_dir("C:\\") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("D:/") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("C:\\\\") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("C:\\videos\\..") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("/") == RR_PATH_DRIVE_ROOT);
+
+	/* Relative spellings act on the process working directory (OBS's install
+	 * directory for obs64), so they are refused — "." most of all, the value
+	 * a crafted settings.json carries. */
+	assert(rr_paths_check_output_dir(".") == RR_PATH_NOT_ABSOLUTE);
+	assert(rr_paths_check_output_dir("..") == RR_PATH_NOT_ABSOLUTE);
+	assert(rr_paths_check_output_dir("out") == RR_PATH_NOT_ABSOLUTE);
+	assert(rr_paths_check_output_dir("out\\sub") == RR_PATH_NOT_ABSOLUTE);
+	assert(rr_paths_check_output_dir("C:out") == RR_PATH_NOT_ABSOLUTE); /* drive-relative */
+}
+
 static void segment_name_pattern(void)
 {
 	assert(rr_paths_is_segment_name("rrseg_x.mkv"));
@@ -597,6 +626,7 @@ int main(void)
 	RUN(buffer_dir_drive_root_is_refused);
 	RUN(buffer_dir_equal_to_output_dir_is_refused);
 	RUN(buffer_dir_dot_segments_are_folded);
+	RUN(output_dir_absolute_not_drive_root);
 	RUN(segment_name_pattern);
 	RUN(save_filename_must_be_bare);
 	RUN(window_seconds_clamped_30_1800);

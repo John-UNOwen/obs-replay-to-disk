@@ -2,8 +2,9 @@
  * Every 5.8 setting gets a widget; the status line refreshes from
  * rr_engine_get_status on a 500 ms QTimer; the buffer folder is validated
  * with rr_paths_check_buffer_dir (core/paths) against the effective output
- * folder; the disk line comes from rr_space_estimate_bytes (core/space) with
- * the total bitrate (50 Mbps assumed for constant quality, 5.5 step 3);
+ * folder, the output folder with rr_paths_check_output_dir; the disk line comes
+ * from rr_space_estimate_bytes (core/space) with the total bitrate (50 Mbps
+ * assumed for constant quality, 5.5 step 3);
  * applying changed settings while the buffer runs offers a restart.
  * Persisting goes through rr_plugin_set_settings -> rr_settings_save
  * (settings.c, clamped via core/settings-clamp). Everything here runs on the
@@ -407,6 +408,19 @@ bool ReplayToDiskDialog::apply()
 		return false;
 	default: /* RR_PATH_EMPTY: neither configured nor resolvable */
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.BufferNotResolved"));
+		return false;
+	}
+	/* Output folder: empty means OBS's recording path; a typed value must be
+	 * absolute and not a drive root — the engine purges "*.rrpart" files and
+	 * writes the saves in exactly that folder (same rule as at start). */
+	switch (rr_paths_check_output_dir(cfg.output_dir)) {
+	case RR_PATH_OK:
+		break;
+	case RR_PATH_DRIVE_ROOT:
+		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.OutputDriveRoot"));
+		return false;
+	default: /* RR_PATH_NOT_ABSOLUTE */
+		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.OutputRelative"));
 		return false;
 	}
 	if (cfg.audio_tracks == 0) { /* defensive: the checkbox guard prevents this */
