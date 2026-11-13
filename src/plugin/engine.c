@@ -105,9 +105,8 @@ static struct {
 	char output_dir[RR_PATHLEN];
 	int fps_num, fps_den;
 
-	int state;           /* worker-owned mirror of the published state */
-	bool stop_requested; /* the stop sequence is waiting for OUTPUT_STOPPED */
-	bool stop_seen;      /* OUTPUT_STOPPED arrived */
+	int state;      /* worker-owned mirror of the published state */
+	bool stop_seen; /* OUTPUT_STOPPED arrived */
 
 	uint64_t last_save_end_ns; /* end of the footage the last save wrote (scope since_last_save; 0 = nothing yet) */
 
@@ -704,7 +703,6 @@ static void stop_session(bool force, bool stop_seen)
 
 	publish_state(RR_STATE_STOPPING);
 	s.stop_seen = stop_seen;
-	s.stop_requested = true;
 
 	if (s.out) {
 		if (force) {
@@ -748,7 +746,6 @@ static void stop_session(bool force, bool stop_seen)
 		s.ledger = NULL;
 	}
 	s.pending_del_count = 0;
-	s.stop_requested = false;
 	publish_state(RR_STATE_OFF);
 	obs_log(LOG_INFO, "buffer stopped");
 }
