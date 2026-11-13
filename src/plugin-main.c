@@ -348,6 +348,16 @@ static void selftest_start(void)
 	if (enc && *enc)
 		snprintf(cfg.video_encoder, sizeof(cfg.video_encoder), "%s", enc);
 
+	/* RR_SELFTEST_FILENAME: selftest-only filename_format override. Without
+	 * it the selftest always uses the default timestamp format, whose name a
+	 * harness cannot pre-create, so the suffix-chain proof (a known stem the
+	 * save collides with) was not runnable on the rig. */
+	const char *fname = getenv("RR_SELFTEST_FILENAME");
+	if (fname && *fname) {
+		snprintf(cfg.filename_format, sizeof(cfg.filename_format), "%s", fname);
+		obs_log(LOG_INFO, "selftest: filename_format override: %s", cfg.filename_format);
+	}
+
 	if (save_mode) {
 		const char *scope = getenv("RR_SELFTEST_SCOPE");
 		cfg.save_scope = (scope && strcmp(scope, "since_last_save") == 0) ? RR_SCOPE_SINCE_LAST_SAVE
