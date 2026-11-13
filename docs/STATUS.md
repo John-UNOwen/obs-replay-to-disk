@@ -915,8 +915,11 @@
   empty keeps the directory's level). Unit-tested in
   `buffer_dir_windows_alias_is_refused` (`D:\out.`, `D:\out `, `D:\out ..`,
   `D:\OUT. `, a mid-path `sub ..`, and stripping that exposes the drive root
-  behind it). Proven by the unit test over the same checker the dialog and
-  `start_session` call; no separate rig start was run for these spellings.
+  behind it), and on the rig: run `r2gap-alias-same` (`2026-11-13
+  18-37-26.txt`) starts the buffer from a `settings.json` whose `buffer_dir`
+  is the output folder spelled with a trailing dot (`<out>.` against `<out>`),
+  and `start_session` refuses it — `buffer error: buffer folder is the same
+  as the output folder` (Gap-close section below).
 - 5. Folder rules missed device paths and UNC share roots (minor). Device
   spellings `\\?\C:\`, `\\.\C:\` and `\??\C:\` alias ordinary folders yet bypass
   the root checks, and `\\server\share` — a whole network volume — was accepted
@@ -927,7 +930,17 @@
   (`\\server\share` yes, `\\server` and `\\server\share\sub` no); the dialog and
   `start_session` map the new error to their own messages
   (`Error.BufferDevicePath`, `Error.OutputDevicePath`). Unit-tested in
-  `buffer_dir_device_path_is_refused` and `unc_share_root_is_refused`.
+  `buffer_dir_device_path_is_refused` and `unc_share_root_is_refused`, and on
+  the rig with both spellings in `settings.json` (autostart, Gap-close section
+  below): `\\?\C:\` as the output folder logs the load-time
+  `settings: output folder '\\?\C:\' is not usable, falling back to the OBS
+  recording path`, and `\\?\...` as the buffer folder is refused at start by
+  `buffer error: buffer folder is a Windows device path (\\?\, \\.\ or \\??\)`
+  (run `r2gap-device`, `2026-11-13 18-37-34.txt`); `\\server\share` in both
+  keys gives `settings: output folder '\\server\share' is not usable, ...` and
+  `buffer error: buffer folder is a drive root` (run `r2gap-unc`, `2026-11-13
+  18-37-41.txt`) — the share root refused as a root, and no network is touched
+  because the checks are textual and come before any disk work.
 - 6. The round-1 fix-7 entry misdescribed the code (docs, minor). It read
   "GetFullPathNameW with a manual fallback", but `paths_canonicalize` is a purely
   textual fold and never calls the Win32 API. Corrected in place by `dd1b9eb`:
@@ -958,9 +971,18 @@
   filename_format '<name>' is not a usable Windows file name, falling back to the
   default`). Unit-tested by the new asserts in `save_filename_must_be_bare` (the
   report's `Best Moment?` spelling among them). The dialog Apply message and a
-  `docs/manual-tests.md` box carry the user-facing path; the settings-load
-  fallback and the `ERROR_INVALID_NAME` cases are unit + code path, not run on
-  the rig this round.
+  `docs/manual-tests.md` box carry the user-facing path, and the settings-load
+  fallback ran on the rig (Gap-close section below): run `r2gap-filename`
+  (`2026-11-13 18-34-48.txt`) loads a hand-written `settings.json` with
+  `filename_format: Best Moment?`, logs the documented
+  `settings: filename_format 'Best Moment?' is not a usable Windows file name,
+  falling back to the default` at plugin load, and the save lands
+  `out\Replay_2026-11-13_18-35-13.mp4` (`warnings=0`) with no `Best Moment*`
+  file in the run. A crafted name that skips settings load is clamped again by
+  `start_session` (engine.c:576) before `build_final_path`'s backstop — run
+  `r2gap-enginename` shows that clamp — so the `ERROR_INVALID_NAME`-at-open
+  scenario stays a unit-test claim (`save_filename_must_be_bare`), not a
+  behavior OBS can reach.
 - 9. Two suffix systems chained `_2_2` (minor). `build_final_path`'s advisory
   name pick and `rename_part_exclusive`'s rename walk were independent, so when
   the advisory picked `<stem>_2` and that file also appeared mid-remux, the rename
@@ -974,8 +996,11 @@
   taken names; the composition where the advisory used `_2` and the rename pass
   starts at 3 lands `_3`). The functions stay `static` in the libobs-linked
   engine, so the engine glue itself is not unit-reachable — the round-1 `fix9r2`
-  run exercised that rename path; the `_2`→`_3` continuation is proven by the
-  unit test over the shared helper both passes now call.
+  run exercised the plain→`_2` rename leg; the `_2`→`_3` continuation through
+  the engine glue ran on the rig in run `r2gap-suffix` (`2026-11-13
+  18-33-12.txt`), where a pre-created `Replay_T.mp4` drove the advisory pick to
+  `_2` and a mid-remux file forced the rename walk from `next_n = 3` (lines and
+  hashes in the Gap-close section below).
 - 10. A held newest segment blocked a whole closed run (minor). When the newest
   ENDED segment was the unclosed one (the usual just-rotated file a scanner
   holds), `rr_window_select` broke before collecting anything and the save logged
@@ -1040,12 +1065,104 @@
   handoff. Fix `69b7a7e`: both headers now point at `docs/wp1-findings.md` and
   `docs/STATUS.md`; `git grep reference/` over `src/` returns nothing after.
 - Honest about what is unit-only vs rig-proven. Rig-proven this round: 1, 2, 7,
-  10, and the WP3/WP4 regression. Unit-test + code-path (not separately run on
-  the rig): 4, 5, 8, 9 (engine glue is the round-1 `fix9r2` rename path; the
-  `_2`→`_3` continuation is the unit test over the shared walk), 11, 12 (CI not
-  run here), 13, and the code half of 14. The three user-facing paths that need a
-  human — issue 8's dialog Apply, issue 13's restart message, and issue 14's
-  cross-profile binding — are carried by `docs/manual-tests.md` boxes (filename
-  validation, restart-skip message, per-profile hotkey) rather than automation.
-  `verify_remux.py` is still not in the repo, so the packet-exact save check stays
-  unrepeatable here (WP6 Deviations).
+  10, and the WP3/WP4 regression. When the round first closed, 4, 5, 8 and 9
+  carried only unit tests plus code-path reading — three of the task's five
+  targeted rig proofs ((b) suffix, (c) filename, (d) aliases) had not been run,
+  so closing then was wrong; the Gap-close section below ran them all on the
+  rig and those entries now cite those runs. Still unit-only or code-path-only:
+  11, 12 (CI not run here), 13, and the code half of 14. The three user-facing
+  paths that need a human — issue 8's dialog Apply, issue 13's restart
+  message, and issue 14's cross-profile binding — are carried by
+  `docs/manual-tests.md` boxes (filename validation, restart-skip message,
+  per-profile hotkey) rather than automation. `verify_remux.py` is still not
+  in the repo, so the packet-exact save check stays unrepeatable here (WP6
+  Deviations).
+
+## Gap close: the three missed round-2 rig proofs
+
+The round-2 wave closed claiming nothing remained while three of the five
+mandated targeted rig proofs were never run: (b) suffix chain, (c)
+settings.json filename, (d) path-alias start refusals — issues 4, 5, 8 and 9
+were labeled unit-test + code path only. The acceptance asked for all five,
+quoted logs and listings included. The blocker for (b) was real: the selftest
+always names saves with the default timestamp format, so a harness cannot
+pre-create the name the save collides with — `fix9r2` could only force the
+plain→`_2` leg once the part file was already visible. (c) and (d) had no
+blocker; they had simply never been run.
+
+- The hook (commit `24e6ca3`): a selftest-only env `RR_SELFTEST_FILENAME`
+  overrides `cfg.filename_format` in `selftest_start` (`src/plugin-main.c`),
+  logging `selftest: filename_format override: <fmt>`. No production settings
+  path is touched. All gates re-ran clean with it in: RelWithDebInfo build 0
+  warnings, `build_check` (CMAKE_COMPILE_WARNING_AS_ERROR=ON) exit 0 with 0
+  warnings, `/W4 /WX` C and C++ builds exit 0, ctest 2/2, clang-format 19.1.1
+  and gersemi 0.29.2 clean. The built DLL went to the rig and every run below
+  uses it.
+- (b) `r2gap-suffix` (`2026-11-13 18-33-12.txt`, save mode, WINDOW=45, one
+  save at t=45 s, override `Replay_T`). The harness pre-creates
+  `out\Replay_T.mp4` (37 B marker `PREEXISTING-DO-NOT-TOUCH-r2gap-suffix`,
+  SHA256 C9A4BD25ECFAD0116B675F7E4166D36B4CD3D5CAA40A7E50390BC7FA5DF8E939,
+  written before OBS started), so `build_final_path`'s advisory pass takes `_2`
+  — the part `Replay_T_2.mp4.rrpart` is created 18:34:03.601 — and hands
+  `next_n = 3` to the rename. The harness creates `Replay_T_2.mp4` (47 B,
+  SHA256 00740E17E056DF9DA79EF3C4692003E2065EC42430564004FA721B132A64C2A6)
+  mid-remux at 18:34:03.625, and the rename refuses it and continues the
+  sequence: `engine: save: ...\out\Replay_T_2.mp4 appeared while saving,
+  wrote to ...\out\Replay_T_3.mp4 instead`, then `save finished:
+  ...\Replay_T_3.mp4 frames=1350 duration=45.00s took=0.18s warnings=0`
+  (18:34:03.757). After the run `out\` holds `Replay_T.mp4` 37 B (hash
+  unchanged), `Replay_T_2.mp4` 47 B (hash unchanged) and `Replay_T_3.mp4`
+  165,947,192 B; ffprobe duration 45.034667 s; `ffmpeg -v warning` silent; 0
+  `*.rrpart` and 0 `rrseg_*.mkv` in the run dir; `selftest finished: ok
+  buffer ran 75s`; `Number of memory leaks: 1` (baseline). That is the
+  stem/`next_n` wiring through the two static engine functions, end to end.
+- (c) `r2gap-filename` (`2026-11-13 18-34-48.txt`, save mode, no override):
+  the module config dir gets a `settings.json` holding `filename_format:
+  Best Moment?` and nothing else. Plugin load logs the documented
+  `settings: filename_format 'Best Moment?' is not a usable Windows file name,
+  falling back to the default` (18:34:50.649), and the t=20 s save finishes
+  `out\Replay_2026-11-13_18-35-13.mp4` (71,671,876 B, `warnings=0`); no
+  `Best Moment*` file exists in the run. settings.json was restored (absent)
+  afterwards. Honest scope: in save mode the selftest's own default cfg names
+  the clips, so what the run proves is the load-time checker and documented
+  fallback on the exact spelling, and that the default it falls back to names
+  saves as `Replay_*.mp4` — the dialog→`g_settings` hop stays the manual box.
+- The engine-side backstop of issue 8 never got its turn, and the run says
+  why: `r2gap-enginename` (`2026-11-13 18-35-41.txt`) feeds `Best Moment?`
+  straight to the engine through the new override, bypassing settings load,
+  and the `settings:` clamp line appears again — `start_session` clamps the
+  incoming config (engine.c:576) before `handle_save`'s
+  `build_final_path` check can see the name — and the save lands
+  `Replay_2026-11-13_18-36-06.mp4`. With two clamps upstream of it, the
+  `filename_format produced the unsafe name` line is unreachable by any
+  start path (defensive depth), and no `ERROR_INVALID_NAME` file-open can
+  happen from a configured format.
+- (d) three autostart runs (each installs a `settings.json`, waits for the
+  refusal, closes OBS by WM_CLOSE, restores settings.json to absent after;
+  each ends at the leak baseline 1):
+  - `r2gap-alias-same` (`2026-11-13 18-37-26.txt`): `buffer_dir`
+    `...\runs\r2gap-alias-same\out.` against `output_dir` the same path
+    without the dot → `buffer error: buffer folder is the same as the output
+    folder` (18:37:29.647).
+  - `r2gap-device` (`2026-11-13 18-37-34.txt`): `output_dir` `\\?\C:\` →
+    load refuses `settings: output folder '\\?\C:\' is not usable, falling
+    back to the OBS recording path` (18:37:36.637); `buffer_dir` spelled
+    `\\?\C:\...` → `buffer error: buffer folder is a Windows device path
+    (\\?\, \\.\ or \??\)` (18:37:36.852).
+  - `r2gap-unc` (`2026-11-13 18-37-41.txt`): `\\server\share` as output →
+    `settings: output folder '\\server\share' is not usable, falling back to
+    the OBS recording path` (18:37:43.784); the same as buffer →
+    `buffer error: buffer folder is a drive root` (18:37:44.015), the share
+    root refused where a drive root is refused. No network was touched: the
+    checks are textual and precede any disk access.
+- WP3/WP4 regression on this final build. `r2gap-wp3` (`2026-11-13
+  18-37-48.txt`): buffer started, 11 segments closed at ~10 s cadence, first
+  prune at +61.5 s, `keep-me.txt` survived in `buffer\`, 0 `rrseg_*` after
+  close, leaks 1; the analyzer's one red line, `No crash sentinel location
+  set`, is present in every rig log including the round-2 originals.
+  `r2gap-wp4` (`2026-11-13 18-40-00.txt`): the t=20 and t=60 saves land
+  ffprobe durations 20.032000 s and 30.000000 s (both bands), `warnings=0`
+  on both, `ffmpeg -v warning` silent on both, 0 `*.rrpart`.
+
+That closes the proof list: (a) and (e) were run in the round, (b), (c) and
+(d) above. What remains unit-only or manual is exactly the honesty bullet.
