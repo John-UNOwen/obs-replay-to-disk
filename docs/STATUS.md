@@ -574,9 +574,11 @@
 - Base and commits: `main` at `f8740ec` (the annotated tag `v0.1.0` stays on it,
   not moved). One commit per problem, oldest first: `7f255b3` `8a3b395`
   `f4096e1` `fbb4f32` `94b5319` `195da3c` `2fc5973` `6312155` `cc63dc2`
-  `b6332eb` `9fc11f9` `2fd806c`, then a docs commit (this box, the README
-  profile-switch and folder/filename notes, the new `docs/manual-tests.md`
-  profile box). Rig = the portable OBS 33.0.1 under `.testrig`, encoder
+  `b6332eb` `9fc11f9` `2fd806c`, then docs commits: `1388e3d` (this box, the
+  README profile-switch and folder/filename notes, the new
+  `docs/manual-tests.md` profile box) and a follow-up that replaces item 9's
+  verification entry with the rig run `fix9r2` recorded there. Rig = the
+  portable OBS 33.0.1 under `.testrig`, encoder
   `obs_qsv11_v2`, 30/1 fps. OBS logs are the files under
   `.testrig/obs/config/obs-studio/logs/`, run dirs under `.testrig/runs/`.
   The rig config was reset mid-loop, so only runs from 12:19 on have a
@@ -716,10 +718,40 @@
   `_2` suffix. Fix `cc63dc2`: new `src/plugin/rename.c` `rr_rename_exclusive`
   (no `REPLACE_EXISTING`, 1 = target exists, libobs-free so tests link it) and
   the save walks the `_N` suffixes on refusal, logging which name it used
-  (engine.c:1106-1141). Verified by the new ctest `rename`
-  (`tests/test_rename.c`: `moves_a_file_when_the_target_is_free`,
-  `refuses_an_existing_target_without_clobber`, `fails_on_a_missing_source`),
-  passing in the run above.
+  (engine.c:1106-1141). Two separate proofs, because the two halves live in
+  different modules.
+  - The exclusive primitive, ctest `rename` (`tests/test_rename.c`:
+    `moves_a_file_when_the_target_is_free`,
+    `refuses_an_existing_target_without_clobber`, `fails_on_a_missing_source`),
+    passing in the ctest run above. This covers `rr_rename_exclusive` only —
+    the suffix walk sits in the libobs-linked engine, so no unit test reaches
+    it.
+  - The engine walk, rig run `fix9r2` (`2026-11-13 13-22-11.txt`, save mode,
+    WINDOW=300, one save at t=240 s). To make the collision deterministic the
+    run harness polls the run's `out\` for the remux part file: the part name
+    is `<chosen-name>.rrpart`, so the moment it exists the advisory
+    `build_final_path` pick is fixed and the file the harness creates lands on
+    the rename, not on that earlier name check. `buffer started` 13:22:16.795,
+    `save started: segments=24` 13:26:17.315, part
+    `Replay_2026-11-13_13-26-17.mp4.rrpart` created 13:26:17.347, harness
+    wrote the pre-existing file under that exact name 20 ms later
+    (13:26:17.367, 31 B, marker text `PREEXISTING-DO-NOT-TOUCH-fix9r2`), and
+    the exclusive rename refused it — the collision line:
+    `engine: save: ...out\Replay_2026-11-13_13-26-17.mp4 appeared while
+    saving, wrote to ...out\Replay_2026-11-13_13-26-17_2.mp4 instead`
+    13:26:18.032 (engine.c:1128-1140), then `save finished:
+    ...Replay_2026-11-13_13-26-17_2.mp4 frames=7200 duration=240.00s
+    took=0.72s warnings=0` at the same stamp. After the run `Get-ChildItem`
+    on `out\` shows both files: `Replay_2026-11-13_13-26-17.mp4` 31 B and
+    `Replay_2026-11-13_13-26-17_2.mp4` 901,294,625 B. The 31 B file is still
+    the marker, never touched: SHA256
+    `DCF1DC3A924CE77B053A70F6AC0F76F30E590A2FA34FF8BBA61874B7EF9E9FA0` when
+    it was written and the same value after the run (`Get-FileHash`, equal to
+    a reference hash of the marker text). The save is a valid clip: ffprobe
+    format duration 240.021333 s (band 232–246 s) and `ffmpeg -v warning -i
+    <save> -map 0 -f null -` exit 0 with no output lines; 0 `*.rrpart` under
+    the run dir. `selftest finished: ok buffer ran 250s`, `plugin unloaded`,
+    `Number of memory leaks: 1` = the stock baseline on the used config.
 - 10. A configured output folder that did not exist refused the start with a
   misleading `not enough free disk ... output drive 0 MB` (minor): the preflight
   measures free space there and a missing folder measures 0. Fix `b6332eb`:
