@@ -303,6 +303,55 @@ static void window_selects_only_overlapping_closed_segments(void)
 	rr_ledger_destroy(l);
 }
 
+static void window_skips_segment_still_being_written(void)
+{
+	/* A segment whose release wait failed: its boundary ended it (end_ns set)
+	 * but it was never marked closed — the file may still be written. It must
+	 * stay out of the save even though a later segment closed normally, and
+	 * first/count must stay a contiguous range of closed (readable) entries. */
+	const uint64_t times[] = {0, SEC(10), SEC(20), SEC(30)};
+	rr_ledger_t *l = rr_ledger_create(30);
+
+	rr_ledger_seed(l, "C:/buf/rrseg_00.mkv", times[0]);
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_01.mkv", times[1]) == 0);
+	rr_ledger_mark_closed(l, 0, MIB(40));
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_02.mkv", times[2]) == 1);
+	/* seg1 stays unclosed: held by the writer past its boundary */
+	assert(rr_ledger_boundary(l, "C:/buf/rrseg_03.mkv", times[3]) == 2);
+	rr_ledger_mark_closed(l, 2, MIB(40));
+
+	/* A 30 s window ending at 30 s covers the whole ledger, but the save can
+	 * only take the closed run after the held segment: seg2 alone. */
+	struct rr_window w;
+	assert(rr_window_select(l, SEC(30), 30, 0, &w));
+	assert(w.first == 2);
+	assert(w.count == 1);
+	assert(secs_eq(w.inpoint_sec, 0.0));
+
+	/* Whatever range is selected, the save's index mapping (first .. first+
+	 * count-1) must contain only closed segments. */
+	for (int i = w.first; i < w.first + w.count; i++) {
+		struct rr_segment_info seg;
+		assert(rr_ledger_get(l, (size_t)i, &seg));
+		assert(seg.closed);
+	}
+
+	/* Prune skips it the same way: only the two closed segments, never 1. */
+	int idx[4];
+	size_t n = rr_ledger_prunable(l, SEC(200), idx, 4);
+	assert(n == 2);
+	assert(idx[0] == 0 && idx[1] == 2);
+
+	/* Once released it becomes saveable: mark it closed and the same window
+	 * now takes the whole run seg0..seg2. */
+	rr_ledger_mark_closed(l, 1, MIB(40));
+	assert(rr_window_select(l, SEC(30), 30, 0, &w));
+	assert(w.first == 0);
+	assert(w.count == 3);
+
+	rr_ledger_destroy(l);
+}
+
 static void window_inpoint_is_offset_into_first_segment(void)
 {
 	/* The buffer starts at 2 s: seed at 2 s, closed at 12/22/32 s. */
@@ -487,6 +536,7 @@ int main(void)
 	RUN(variable_segment_lengths_10_83s);
 	RUN(small_segment_is_kept);
 	RUN(window_selects_only_overlapping_closed_segments);
+	RUN(window_skips_segment_still_being_written);
 	RUN(window_inpoint_is_offset_into_first_segment);
 	RUN(window_larger_than_buffer_selects_everything_inpoint_zero);
 	RUN(since_last_save_moves_window_start);

@@ -807,7 +807,8 @@ static void retry_pending_deletes(void)
 }
 
 /* BOUNDARY (5.4): close the ledger at t_ns (D7), wait for the writer to
- * release the segment (D8), record its size, log, prune (D10). */
+ * release the segment (D8); only a released segment is marked closed, sized
+ * and logged (a held one is retried on idle ticks), then prune (D10). */
 static void handle_boundary(const char *path, uint64_t t_ns)
 {
 	if (!s.ledger) {
@@ -841,16 +842,23 @@ static void handle_boundary(const char *path, uint64_t t_ns)
 			break;
 		os_sleep_ms(20);
 	}
-	if (!closed)
+	if (!closed) {
+		/* The muxer (or a scanner on the file) still holds it. The segment
+		 * stays NOT closed: save selection and prune skip it, so an MKV
+		 * being written never reaches rr_remux (a save would read only the
+		 * prefix valid at that moment and log as a clean success — silent
+		 * tail loss). The idle-tick probe in retry_segment_releases()
+		 * closes it once the release really happens. */
 		obs_log(LOG_WARNING, "engine: segment not released within 2 s: %s", seg);
+	} else {
+		int64_t bytes = -1;
+		struct stat st;
+		if (os_stat(seg, &st) == 0)
+			bytes = (int64_t)st.st_size;
 
-	int64_t bytes = -1;
-	struct stat st;
-	if (os_stat(seg, &st) == 0)
-		bytes = (int64_t)st.st_size;
-
-	rr_ledger_mark_closed(s.ledger, idx, bytes);
-	obs_log(LOG_INFO, "segment closed: %s dur=%.2fs bytes=%lld", seg, dur, (long long)bytes);
+		rr_ledger_mark_closed(s.ledger, idx, bytes);
+		obs_log(LOG_INFO, "segment closed: %s dur=%.2fs bytes=%lld", seg, dur, (long long)bytes);
+	}
 
 	prune();
 }
@@ -1215,8 +1223,36 @@ static void handle_save(void)
 
 /* ------------------------------------------------------- idle tasks (5.4) */
 
+/* D8 retry: a segment that failed the 2 s release wait at its boundary stays
+ * unclosed — invisible to save selection and prune — until an idle tick's
+ * exclusive-open probe proves the release; only then is it marked closed and
+ * logged with the usual "segment closed" line. */
+static void retry_segment_releases(void)
+{
+	if (!s.ledger)
+		return;
+
+	const size_t n = rr_ledger_count(s.ledger);
+	for (size_t i = 0; i < n; i++) {
+		struct rr_segment_info si;
+		if (!rr_ledger_get(s.ledger, i, &si) || !si.path || si.closed || si.end_ns == 0)
+			continue;
+		if (!rr_file_closed(si.path))
+			continue;
+
+		int64_t bytes = -1;
+		struct stat st;
+		if (os_stat(si.path, &st) == 0)
+			bytes = (int64_t)st.st_size;
+		rr_ledger_mark_closed(s.ledger, (int)i, bytes);
+		obs_log(LOG_INFO, "segment closed: %s dur=%.2fs bytes=%lld", si.path,
+			(double)(si.end_ns - si.start_ns) / 1e9, (long long)bytes);
+	}
+}
+
 static void idle_tasks(void)
 {
+	retry_segment_releases();
 	retry_pending_deletes();
 
 	if (s.out) {
