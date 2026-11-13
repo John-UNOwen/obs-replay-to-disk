@@ -285,6 +285,44 @@ jobs:
           target: x64
           config: ${{ needs.check-event.outputs.config }}
 
+      - name: Run Unit Tests 🧪
+        run: |
+          # Run Unit Tests 🧪
+          if ( $Env:RUNNER_DEBUG -ne $null ) {
+            Set-PSDebug -Trace 1
+          }
+
+          $Config = '${{ needs.check-event.outputs.config }}'
+
+          # Reconfigure the build tree from the CI preset with the ctest suite
+          # enabled (the plugin itself is already built and installed).
+          cmake --preset windows-ci-x64 -D ENABLE_TESTS=ON
+          if ( $LASTEXITCODE -ne 0 ) {
+            throw 'Configuring the unit tests failed.'
+          }
+
+          cmake --build --preset windows-ci-x64 --config $Config --target test_core test_rename --parallel
+          if ( $LASTEXITCODE -ne 0 ) {
+            throw 'Building the unit tests failed.'
+          }
+
+          # test_core links the obs-deps FFmpeg DLLs; prepend the directory
+          # recorded in the CMake cache so ctest can resolve them.
+          $FfDirs = Select-String -LiteralPath build_x64/CMakeCache.txt -Pattern '^FFmpeg_(avformat|avcodec|avutil)_LIBRARY:FILEPATH=(.+\.dll)$' |
+            ForEach-Object { Split-Path -Path $_.Matches[0].Groups[2].Value -Parent } |
+            Select-Object -Unique
+          if ( -not $FfDirs ) {
+            throw 'The FFmpeg DLLs the tests link against were not found in the CMake cache.'
+          }
+          foreach ( $FfDir in $FfDirs ) {
+            $env:PATH = "${FfDir};${env:PATH}"
+          }
+
+          ctest --test-dir build_x64 -C $Config --output-on-failure
+          if ( $LASTEXITCODE -ne 0 ) {
+            throw "Unit tests failed (ctest exit code ${LASTEXITCODE})."
+          }
+
       - name: Package Plugin 📀
         uses: ./.github/actions/package-plugin
         with:
