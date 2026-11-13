@@ -477,3 +477,94 @@
     the first time inside the pending manual test (survive-restart box).
   - `rolling_replay_saved` still has no in-app subscriber (the UI refreshes
     via the QTimer); the signal stays for scripts.
+
+
+## WP6 hardening, docs, tag: DONE — except the owner manual-test checklist
+- Date: 2026-11-13
+- Commits: 91f35d3 (docs/manual-tests.md) cedfdd3 (README) (+ this status
+  commit; the local annotated tag `v0.1.0` lands on this commit, not pushed).
+- Acceptance (WP6 step 2: re-run of the WP3 and WP4 acceptance on the final
+  HEAD 6aa7199; rig, encoder auto-resolved `obs_qsv11_v2`, rig fps 30/1; the
+  used rig config means `Number of memory leaks: 1` is the stock-OBS baseline,
+  plugin delta 0):
+  - PASS: build gates on HEAD. `cmake --preset windows-x64` exit 0;
+    `cmake --build --preset windows-x64 --config RelWithDebInfo` exit 0 with
+    0 warning lines; `ctest --test-dir build_x64 -C RelWithDebInfo` →
+    `100% tests passed, 0 tests failed out of 1` exit 0;
+    `cmake --install build_x64 --prefix release/RelWithDebInfo` exit 0; DLL +
+    PDB + `data/locale/en-US.ini` deployed to the rig per 7.1 (last code
+    commit 1b604e0, so the binary was current for HEAD).
+  - PASS: Run A, WP3 buffer suite (`RR_SELFTEST=buffer WINDOW=30 RUN=120`,
+    run `wp6-A`, log `2026-11-13 06-55-57.txt`). 06:56:01.010 `buffer
+    started: encoder=obs_qsv11_v2 fps=30/1 tracks=1 window=30s`; 11 `segment
+    closed` lines, first `dur=11.46s` then 10.00 s intervals within 3 ms
+    (06:56:12.494 → 06:57:52.498); first `pruned:` 06:57:02.496 = +61.5 s
+    after start (D10: window 30 s + 15 s margin + next boundary; 6 prunes);
+    `keep-me.txt` pre-placed in the buffer dir survived the run and the stop
+    purge (the only file left there); `engine: purged 6 segment file(s) on
+    stop` then `buffer stopped`, 0 `rrseg_*.mkv` after; every watchdog tick
+    `lagged=0`; `selftest finished: ok buffer ran 120s`; WM_CLOSE →
+    `OBS_EXITED_CLEANLY` in <1 s; `plugin unloaded`; `Number of memory
+    leaks: 1` = stock baseline. One cosmetic
+    `duplicate name "rr_selftest_media 2"` warning, the known WP3/WP4
+    global-source carry-over.
+  - PASS: Run B, WP4 save suite (`RR_SELFTEST=save WINDOW=30 SAVES=20,60
+    SCOPE=window REFERENCE=1 RUN=100`, run `wp6-B`, log
+    `2026-11-13 06-58-19.txt`). `save started: segments=2 inpoint=0.00s`
+    06:58:43.030 → `save finished: ...Replay_2026-11-13_06-58-43.mp4
+    frames=600 duration=20.00s took=0.04s warnings=0`; `save started:
+    segments=4 inpoint=10.00s` 06:59:23.025 → `...Replay_2026-11-13_06-59-23
+    .mp4 frames=930 duration=31.00s took=0.19s warnings=0`; ffprobe durations
+    20.032 s (band 19–21 s) and 31.000 s (band 30.0–31.1 s); `verify_remux.py
+    <clip> reference.mkv` exit 0 for both (600/600 + 939/939 and 930/930 +
+    1453/1453 `matched_in_order==packets`, spread ≤0.667 ms,
+    `dts_monotonic=True`, `dts<=pts=True`, `alignments=1`, constant A/V
+    offsets +21.333 ms and −11.333 ms); `ffmpeg -v warning -i <clip> -map 0
+    -f null -` silent for both; 0 `*.rrpart` recursively after the run; 0
+    `rrseg_*` after stop; clean WM_CLOSE exit, `plugin unloaded`, leaks 1.
+    (`verify_remux.py` ran from the `.handoff` reference folder, deleted
+    afterwards — see Deviations.)
+- Handoff WP6 steps: step 1 (manual tests on a real machine with a real game)
+  → the checklist is written as `docs/manual-tests.md` (91f35d3), owner runs
+  it; step 2 done above, no failures to fix; step 3 README final (cedfdd3):
+  install to `%ProgramData%\obs-studio\plugins\`, uninstall, all 14 settings
+  of 5.8, side effects of 1.3 verbatim, disk sizing of section 10, the exact
+  OBS-33.0.1 pin (B5/D17), known limits, the AI-assistance statement; step 4
+  tag: local annotated `v0.1.0` only, no push, CI build or GitHub release —
+  the owner publishes; step 5: nothing posted anywhere.
+- Deviations from the handoff: no code changes in WP6 (the tree at the tag is
+  the code of 1b604e0). The handoff's tag-CI-publish chain (step 4) is
+  replaced by the owner decision: local commits and the local tag only. The
+  gitignored `.handoff/` package was removed from the working tree after the
+  last run that needed it (`verify_remux.py`); no tracked file references a
+  `.handoff/` path (checked with `git grep` before deleting).
+- Open problems:
+  - The `docs/manual-tests.md` checklist is owner-pending, incl. the four WP5
+    manual boxes and the NVENC/AMF matrix and HDR box, which need a machine
+    with that hardware (this host is Intel-only; the QSV findings in
+    `docs/wp1-findings.md` carry over).
+
+## v0.1.0 READY (summary)
+- WP0 repository and build: DONE — three build commands pass, plugin loads in
+  rig OBS 33.0.1 with `avformat 62.12.102`, Windows CI green (WP0 box above).
+- WP1 spike inside real OBS: DONE — U1–U4 measured on Intel QSV, remux
+  verified clean, leak control matrix in `docs/wp1-findings.md` (WP1 box).
+- WP2 pure-C core and tests: DONE — `rr_core` + `tests/test_core.c` (18
+  tests), ctest passes, core clean at /W3 /WX and /W4 /WX (WP2 box).
+- WP3 buffer engine: DONE — start/roll/prune/stop on the rig, purge rules,
+  profile-switch autostart, ≤5 s closes, runs wp3-r1…r3 (WP3 box).
+- WP4 save flow: DONE — duration bands, packet-exact saves vs the reference,
+  2-track saves, part-file lifecycle, prune pause, close-during-save G runs
+  (WP4 box, G PASS 2026-11-13).
+- WP5 user interface and hotkeys: DONE — dialog, dock, hotkeys; agent load
+  smoke PASS; the four manual acceptance boxes stay owner-PENDING (WP5 box;
+  the how-to is in `docs/manual-tests.md`).
+- WP6 hardening, docs, tag: DONE except owner manual tests — WP3+WP4
+  acceptance re-run PASS on the final HEAD (WP6 box above); README and
+  `docs/manual-tests.md` written; local tag `v0.1.0`, not pushed.
+- Owner publish checklist: (1) push `main` and the tag `v0.1.0` to GitHub;
+  (2) confirm the CI Windows job builds the release package; (3) publish the
+  GitHub release with that package, stating it requires OBS 33.0.1; (4) run
+  `docs/manual-tests.md` on a real machine with a real game and report the
+  NVENC/AMF/HDR results there; fix what fails and re-tag if needed.
+  Done for v0.1.0 (handoff WP6) = every acceptance box PASS.
