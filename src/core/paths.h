@@ -41,6 +41,17 @@ enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char 
  * judged as "D:\" and "D:\videos\.. " likewise. */
 enum rr_path_error rr_paths_check_output_dir(const char *output_dir);
 
+/* The volume-root test both checkers run on the canonicalized spelling,
+ * exposed so its own contract can be tested directly: the checkers gate
+ * relative spellings as NOT_ABSOLUTE before this is ever reached. Roots:
+ * "C:\", "C:/", "D:\" (any number of trailing slashes), "/", "\\" (the
+ * raw-fallback spelling), and the UNC share root "\\server\share" (likewise
+ * with trailing slashes). Not roots: anything below them, the UNC server
+ * listing "\\server", and the drive-relative spellings "C:" and "C:file" —
+ * Windows resolves those against the drive's current directory, so they
+ * name no root at all. */
+bool rr_paths_is_drive_root(const char *p);
+
 bool rr_paths_is_segment_name(const char *file_name); /* "rrseg_*.mkv" only */
 bool rr_paths_is_part_name(const char *file_name);    /* "*.rrpart" only */
 

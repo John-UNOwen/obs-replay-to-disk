@@ -762,6 +762,41 @@ static void output_dir_absolute_not_drive_root(void)
 	assert(rr_paths_check_output_dir("C:out") == RR_PATH_NOT_ABSOLUTE); /* drive-relative */
 }
 
+/* rr_paths_is_drive_root() judged on its own contract. The public checkers
+ * refuse relative spellings with path_is_absolute() first (asserted above:
+ * check_output_dir("C:out") is NOT_ABSOLUTE), so this predicate never sees
+ * "C:" through them — the round-2 checkup found its drive branch answering
+ * "C:" a root while its comment always said drive-relative "C:" is not one.
+ * Asserted directly so the trap cannot come back quietly. */
+static void drive_root_helper_matches_its_contract(void)
+{
+	/* Roots: a drive letter, ':' and nothing but separators after it, in
+	 * either slash style; the POSIX root; the raw-fallback "\\" spelling;
+	 * the UNC share root. */
+	assert(rr_paths_is_drive_root("C:\\"));
+	assert(rr_paths_is_drive_root("c:/"));
+	assert(rr_paths_is_drive_root("D:\\"));
+	assert(rr_paths_is_drive_root("C:\\\\"));
+	assert(rr_paths_is_drive_root("\\"));
+	assert(rr_paths_is_drive_root("/"));
+	assert(rr_paths_is_drive_root("\\\\server\\share"));
+	assert(rr_paths_is_drive_root("\\\\server\\share\\\\"));
+
+	/* Not roots: anything below a root, the UNC server listing, and the
+	 * drive-relative spellings — "C:" and "C:file" resolve against the
+	 * drive's current directory, not at the volume root. */
+	assert(!rr_paths_is_drive_root("C:"));
+	assert(!rr_paths_is_drive_root("c:"));
+	assert(!rr_paths_is_drive_root("C:file.txt"));
+	assert(!rr_paths_is_drive_root("C:\\out"));
+	assert(!rr_paths_is_drive_root("C:/out"));
+	assert(!rr_paths_is_drive_root("/out"));
+	assert(!rr_paths_is_drive_root("\\\\server"));
+	assert(!rr_paths_is_drive_root("\\\\server\\share\\sub"));
+	assert(!rr_paths_is_drive_root(""));
+	assert(!rr_paths_is_drive_root("out\\sub"));
+}
+
 static void segment_name_pattern(void)
 {
 	assert(rr_paths_is_segment_name("rrseg_x.mkv"));
@@ -940,6 +975,7 @@ int main(void)
 	RUN(buffer_dir_device_path_is_refused);
 	RUN(unc_share_root_is_refused);
 	RUN(output_dir_absolute_not_drive_root);
+	RUN(drive_root_helper_matches_its_contract);
 	RUN(segment_name_pattern);
 	RUN(save_filename_must_be_bare);
 	RUN(save_suffix_walk_continues_the_sequence);

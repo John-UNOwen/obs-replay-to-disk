@@ -33,8 +33,10 @@ static bool path_is_absolute(const char *p)
  * slashes): the share root is the whole network volume for the engine's
  * purges, so it is refused like a drive root. Below the share
  * ("\\server\share\folder") or above it ("\\server", the server listing)
- * it is not a root. "C:" alone is drive-relative, not a root. */
-static bool path_is_drive_root(const char *p)
+ * it is not a root. The drive branch recognizes only the "X:" + separator
+ * spelling: "C:" alone, or "C:file" resolved against the drive's current
+ * directory, is drive-relative and names no root. See paths.h. */
+bool rr_paths_is_drive_root(const char *p)
 {
 	const char *rest;
 
@@ -59,8 +61,12 @@ static bool path_is_drive_root(const char *p)
 		if (p[0] == '\\')
 			return p[1] == 0; /* "\\" alone (a raw-fallback spelling) */
 		rest = p + 1;
+	} else if (isalpha((unsigned char)p[0]) && p[1] == ':' && is_sep(p[2])) {
+		rest = p + 2; /* "C:" + separator: the drive-root spelling */
 	} else {
-		rest = p + 2; /* C: */
+		/* Drive-relative "C:" / "C:file", or not a rooted spelling at
+		 * all (relative text, empty). */
+		return false;
 	}
 
 	while (*rest && is_sep(*rest))
@@ -229,7 +235,7 @@ enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char 
 	const char *buf = buf_canon;
 	if (!paths_canonicalize(buf_canon, sizeof(buf_canon), buffer_dir))
 		buf = buffer_dir;
-	if (path_is_drive_root(buf))
+	if (rr_paths_is_drive_root(buf))
 		return RR_PATH_DRIVE_ROOT;
 
 	/* An empty output_dir means "OBS's recording path", resolved by the caller;
@@ -263,7 +269,7 @@ enum rr_path_error rr_paths_check_output_dir(const char *output_dir)
 	const char *out = canon;
 	if (!paths_canonicalize(canon, sizeof(canon), output_dir))
 		out = output_dir;
-	if (path_is_drive_root(out))
+	if (rr_paths_is_drive_root(out))
 		return RR_PATH_DRIVE_ROOT;
 	return RR_PATH_OK;
 }
