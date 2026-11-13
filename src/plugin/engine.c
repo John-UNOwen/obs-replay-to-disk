@@ -42,6 +42,7 @@
 #define RR_MAX_SAVE_SEGS 512                /* > 1800 s / 10 s + headroom */
 #define RR_SAVE_FREE_MARGIN (256 << 20)     /* 5.6 step 6 */
 #define RR_SAVE_SPLIT_TIMEOUT_NS 3000000000ull /* 5.6 step 3: 3 s */
+#define RR_SAVE_DEFER_CAP 32                /* STOPs parked while draining (5.3) */
 
 /* ------------------------------------------------------- commands and queue */
 
@@ -908,12 +909,20 @@ static void sweep_save_queue(void)
 
 /* 5.6 step 3: keep reading the queue, handling BOUNDARYs normally, until one
  * arrives with t >= t_req, or 3 s pass (then a warning; the caller continues
- * with the closed segments). STOP is deferred to the queue tail (5.3). */
+ * with the closed segments). STOP is parked in a local list OUTSIDE the queue
+ * (deferred to run when the save ends, 5.3): putting it back into the queue
+ * keeps q_count >= 1 forever, so the loop never sleeps and the 3 s timeout
+ * branch — which only runs when the dequeue comes up empty — is unreachable.
+ * With the STOP parked, the queue drains empty, the loop sleeps on the queue
+ * event, and the timeout fires on a stalled muxer. */
 static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
 {
 	const uint64_t deadline = t_req + RR_SAVE_SPLIT_TIMEOUT_NS;
+	struct rr_cmd deferred[RR_SAVE_DEFER_CAP]; /* STOPs parked out of the queue (5.3) */
+	size_t deferred_count = 0;
+	bool finished = false;
 
-	for (;;) {
+	while (!finished) {
 		struct rr_cmd cmd;
 		if (dequeue_cmd(&cmd)) {
 			switch (cmd.type) {
@@ -921,14 +930,17 @@ static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
 				handle_boundary(cmd.path, cmd.t_ns);
 				if (cmd.t_ns >= t_req) {
 					*window_end = cmd.t_ns;
-					return;
+					finished = true;
 				}
 				break;
 			case CMD_SAVE:
 				obs_log(LOG_INFO, "engine: SAVE ignored (saving)");
 				break;
 			case CMD_STOP:
-				enqueue_cmd(&cmd); /* queued: runs when the save ends */
+				/* Parked: runs when the save ends. A STOP past the
+				 * parking capacity is redundant (one stop is enough). */
+				if (deferred_count < RR_SAVE_DEFER_CAP)
+					deferred[deferred_count++] = cmd;
 				break;
 			case CMD_START:
 				obs_log(LOG_INFO, "engine: START ignored (saving)");
@@ -937,19 +949,30 @@ static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
 				break;
 			case CMD_QUIT:
 				InterlockedExchange(&g_quit, 1);
-				return;
+				deferred_count = 0; /* QUIT force-stops: no STOP to re-queue */
+				finished = true;
+				break;
 			case CMD_OUTPUT_STOPPED:
 				handle_unexpected_stopped(cmd.code); /* 5.3 */
 				*stopped = true;
-				return;
+				deferred_count = 0; /* the stop sequence already ran */
+				finished = true;
+				break;
 			}
 		} else if (os_gettime_ns() >= deadline) {
 			obs_log(LOG_WARNING, "engine: save: no boundary within 3 s, continuing with closed segments");
-			return;
+			finished = true;
+		} else if (q_wake) {
+			os_event_timedwait(q_wake, 100);
 		} else {
 			os_sleep_ms(10);
 		}
 	}
+
+	/* Hand the deferred STOPs back to the queue tail: they run when the
+	 * save ends (5.3), after the caller finishes the remux. */
+	for (size_t i = 0; i < deferred_count; i++)
+		enqueue_cmd(&deferred[i]);
 }
 
 /* 5.6 step 7: final path from the filename format, with _2/_3/… suffixes
