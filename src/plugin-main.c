@@ -171,6 +171,18 @@ static void selftest_detach_media(void)
 static DWORD WINAPI selftest_worker(LPVOID arg)
 {
 	const uint64_t run_ns = (uint64_t)(uintptr_t)arg * 1000000000ull;
+	/* The run clock starts when the buffer reaches BUFFERING: encoder init
+	 * on hardware takes seconds (wp1-findings), and RR_SELFTEST_SAVES
+	 * should mean seconds into buffered video, not into OBS loading. */
+	const uint64_t gate_deadline = os_gettime_ns() + 60ull * 1000000000ull;
+	for (;;) {
+		struct rr_status gate;
+		rr_engine_get_status(&gate);
+		if (gate.state == RR_STATE_BUFFERING || g_st_stop || os_gettime_ns() >= gate_deadline)
+			break;
+		os_sleep_ms(50);
+	}
+
 	const uint64_t start = os_gettime_ns();
 	uint64_t next_stat = start;
 
