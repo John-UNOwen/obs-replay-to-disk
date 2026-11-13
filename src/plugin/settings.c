@@ -11,8 +11,6 @@
 #include "settings.h"
 #include "core/settings-clamp.h"
 
-#define RR_FILENAME_FMT_DEFAULT "Replay_%CCYY-%MM-%DD_%hh-%mm-%ss"
-
 /* 5.8 ranges */
 #define RR_BITRATE_MIN 1000
 #define RR_BITRATE_MAX 150000

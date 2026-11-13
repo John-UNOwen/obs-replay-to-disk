@@ -110,6 +110,20 @@ bool rr_paths_is_segment_name(const char *file_name)
 	return true;
 }
 
+bool rr_paths_is_safe_filename(const char *name)
+{
+	if (!name || !name[0])
+		return false;
+
+	for (const char *p = name; *p; p++) {
+		if (*p == '/' || *p == '\\' || *p == ':')
+			return false;
+	}
+	if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+		return false;
+	return true;
+}
+
 bool rr_paths_is_part_name(const char *file_name)
 {
 	if (!file_name)

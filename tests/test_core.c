@@ -513,6 +513,31 @@ static void segment_name_pattern(void)
 	assert(!rr_paths_is_part_name("rrseg_x.mkv"));
 }
 
+static void save_filename_must_be_bare(void)
+{
+	/* Bare names, including the 5.8 default format (with % tokens). */
+	assert(rr_paths_is_safe_filename("Replay_2026-11-13_06-58-43.mp4"));
+	assert(rr_paths_is_safe_filename("Replay_%CCYY-%MM-%DD_%hh-%mm-%ss.mp4"));
+	assert(rr_paths_is_safe_filename("my replay (2).mp4"));
+
+	/* Path separators and drive/stream colons escape the output folder. */
+	assert(!rr_paths_is_safe_filename("..\\Replay_escape"));
+	assert(!rr_paths_is_safe_filename("../Replay_escape"));
+	assert(!rr_paths_is_safe_filename("sub\\Replay"));
+	assert(!rr_paths_is_safe_filename("sub/Replay"));
+	assert(!rr_paths_is_safe_filename("C:\\Replay"));
+	assert(!rr_paths_is_safe_filename("C:Replay_stream"));
+	assert(!rr_paths_is_safe_filename("\\\\server\\share\\Replay"));
+
+	/* Current/parent directory as the whole name. */
+	assert(!rr_paths_is_safe_filename("."));
+	assert(!rr_paths_is_safe_filename(".."));
+	assert(rr_paths_is_safe_filename("..mp4")); /* a benign name, not a dir ref */
+
+	assert(!rr_paths_is_safe_filename(""));
+	assert(!rr_paths_is_safe_filename(NULL));
+}
+
 static void window_seconds_clamped_30_1800(void)
 {
 	assert(rr_settings_clamp_window_sec(10) == 30);
@@ -545,6 +570,7 @@ int main(void)
 	RUN(buffer_dir_drive_root_is_refused);
 	RUN(buffer_dir_equal_to_output_dir_is_refused);
 	RUN(segment_name_pattern);
+	RUN(save_filename_must_be_bare);
 	RUN(window_seconds_clamped_30_1800);
 
 	printf("all tests passed\n");

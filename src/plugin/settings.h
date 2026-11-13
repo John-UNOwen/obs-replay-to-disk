@@ -16,6 +16,10 @@ extern "C" {
 #define RR_FILENAME_FMT_LEN 256
 #define RR_EXTRA_JSON_LEN 4096
 
+/* 5.8 default filename format (settings.c default/clamp; engine.c fallback
+ * when a configured format generates an unsafe name). */
+#define RR_FILENAME_FMT_DEFAULT "Replay_%CCYY-%MM-%DD_%hh-%mm-%ss"
+
 enum rr_save_scope { RR_SCOPE_WINDOW = 0, RR_SCOPE_SINCE_LAST_SAVE = 1 };
 enum rr_rate_control { RR_RC_CBR = 0, RR_RC_CQP = 1 };
 

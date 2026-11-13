@@ -1018,10 +1018,22 @@ static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
 }
 
 /* 5.6 step 7: final path from the filename format, with _2/_3/… suffixes
- * while the plain name exists (D13's rename target). */
+ * while the plain name exists (D13's rename target). The generated name must
+ * be a bare file name (core/paths): os_generate_formatted_filename does not
+ * strip '/', '\' or ':' from a crafted format, and out_dir + '\' + name would
+ * then escape the output folder. An unsafe name falls back to the default
+ * format with a warning. */
 static bool build_final_path(const char *out_dir, const char *fmt, char *final_path, size_t sz)
 {
 	char *fname = os_generate_formatted_filename("mp4", false, fmt);
+	if (fname && !rr_paths_is_safe_filename(fname)) {
+		obs_log(LOG_WARNING,
+			"engine: filename_format produced the unsafe name \"%s\", using the default format", fname);
+		bfree(fname);
+		fname = NULL;
+	}
+	if (!fname)
+		fname = os_generate_formatted_filename("mp4", false, RR_FILENAME_FMT_DEFAULT);
 	if (!fname)
 		return false;
 	snprintf(final_path, sz, "%s\\%s", out_dir, fname);

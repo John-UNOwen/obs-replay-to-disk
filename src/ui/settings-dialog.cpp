@@ -413,6 +413,13 @@ bool ReplayToDiskDialog::apply()
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.TrackRequired"));
 		return false;
 	}
+	/* Filename format: a bare-name format only — '/', '\' or ':' would let
+	 * the generated save name escape the output folder (the engine also
+	 * refuses such a name at save time and falls back to the default). */
+	if (cfg.filename_format[0] && !rr_paths_is_safe_filename(cfg.filename_format)) {
+		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.FilenameFormat"));
+		return false;
+	}
 
 	struct rr_status st;
 	rr_engine_get_status(&st);

@@ -20,6 +20,12 @@ enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char 
 bool rr_paths_is_segment_name(const char *file_name); /* "rrseg_*.mkv" only */
 bool rr_paths_is_part_name(const char *file_name);    /* "*.rrpart" only */
 
+/* True when name is safe to append to one folder: a bare name with no '/' or
+ * '\\', no ':' (drive prefix or NTFS stream), and not "." or "..". Used for
+ * the generated save file name and for the configured filename_format, so a
+ * crafted format can never write outside the output folder. */
+bool rr_paths_is_safe_filename(const char *name);
+
 #ifdef __cplusplus
 }
 #endif
