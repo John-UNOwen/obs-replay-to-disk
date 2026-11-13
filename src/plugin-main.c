@@ -113,17 +113,21 @@ static void on_toggle_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey,
 		rr_plugin_stop();
 }
 
-/* Snippet 8.3 verbatim: OBS saves hotkey bindings but does not load them for
- * plugins. Call on the UI thread at FINISHED_LOADING and PROFILE_CHANGED. */
+/* Snippet 8.3 (adjusted): OBS saves hotkey bindings but does not load them for
+ * plugins. Call on the UI thread at FINISHED_LOADING and PROFILE_CHANGED.
+ * obs_hotkey_load is always called, with an empty array when the new profile
+ * stores no bindings: it is the only libobs path that clears the previous
+ * profile's live bindings (remove_bindings inside obs_hotkey_load,
+ * libobs/obs-hotkey.c), so skipping it for a profile without an entry leaves
+ * the old profile's hotkey firing while the new profile's dialog shows no
+ * binding. */
 static void load_hotkey(obs_hotkey_id id, const char *name)
 {
 	const char *json = config_get_string(obs_frontend_get_profile_config(), "Hotkeys", name);
-	if (!json)
-		return;
-	obs_data_t *data = obs_data_create_from_json(json);
-	if (!data)
-		return;
-	obs_data_array_t *bindings = obs_data_get_array(data, "bindings");
+	obs_data_t *data = json ? obs_data_create_from_json(json) : NULL;
+	obs_data_array_t *bindings = data ? obs_data_get_array(data, "bindings") : NULL;
+	if (!bindings)
+		bindings = obs_data_array_create();
 	obs_hotkey_load(id, bindings);
 	obs_data_array_release(bindings);
 	obs_data_release(data);
