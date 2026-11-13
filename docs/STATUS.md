@@ -343,3 +343,96 @@
   - `rr_selftest_media` persists as a global source in the rig collection (WP3
     carry-over).
 
+
+## WP5 user interface and hotkeys: DONE — manual acceptance PENDING (host wedge, see Acceptance)
+- Date: 2026-11-13
+- Commits: 1b604e0 (+ this status commit)
+- Acceptance (handoff WP5 is "manual, in the test rig"; every line is
+  OBS-window-dependent and no OBS instance can finish startup on this host —
+  the WP4 Open-problems wedge persists):
+  - PENDING: Both hotkeys appear in Settings → Hotkeys, work, and still work
+    after restarting OBS.
+  - PENDING: Each setting survives an OBS restart.
+  - PENDING: A buffer folder of `C:\` or the output folder is refused with a
+    message.
+  - PENDING: Start, Save and Stop work from the dialog; the status line follows.
+  - Re-verify recipe (post-reboot, next agent): (1) build, install per handoff
+    7.1: DLL+PDB -> `.testrig/obs/obs-plugins/64bit/`, `data/` ->
+    `.testrig/obs/data/obs-plugins/obs-replay-to-disk/`. (2) Launch with no
+    `RR_SELFTEST` in the environment (fresh pwsh; the `.testrig/scripts`
+    launchers set it - use them only with the env removed, or launch directly:
+    `.testrig/obs/bin/64bit/obs64.exe --portable --disable-updater
+    --disable-missing-files-check --multi --minimize-to-tray`; strictly one
+    instance per portable config). (3) Settings -> Hotkeys shows "Replay to
+    Disk: Save" and "Replay to Disk: Start/Stop Buffer" - bind both, exercise,
+    close via `close-obs.ps1` (saved PID), relaunch, exercise again (binding
+    persistence = the B6 reload at FINISHED_LOADING). (4) Tools -> "Replay to
+    Disk...": change values incl. autostart, Apply, restart OBS, reopen -
+    values persisted (settings.json through the now-wired `rr_settings_save`,
+    first in-app caller). (5) Buffer folder `C:\` and = output folder ->
+    warning box on Apply, settings not saved. (6) Start/Save/Stop from the
+    dialog and from the "replay_to_disk_dock" dock (Docks menu; starts
+    hidden); status line follows the engine within ~0.5 s; a settings change
+    while buffering offers a restart (Yes -> stop, wait_off 6 s, start with
+    the new snapshot).
+- Verified locally 2026-11-13 (repo root; VS Build Tools 2026 cmake/ninja on
+  PATH, formatters from `%APPDATA%\Python\Python314\Scripts`):
+  - `cmake --preset windows-x64` -> exit 0.
+  - `cmake --build --preset windows-x64 --config RelWithDebInfo` -> exit 0,
+    0 warning lines; AUTOMOC processed the two Q_OBJECT headers and the Qt C++
+    TUs (settings-dialog.cpp, status-dock.cpp, mocs_compilation) linked into
+    `obs-replay-to-disk.dll`.
+  - CI posture: `cmake --preset windows-x64 -B build_check -DENABLE_TESTS=ON
+    -DCMAKE_COMPILE_WARNING_AS_ERROR=ON` then `cmake --build build_check
+    --config RelWithDebInfo` -> exit 0, 0 warnings (C and Qt C++ at /W3 /WX).
+  - Stricter one-off `/W4 /WX` for the C TUs (`-DCMAKE_C_FLAGS='/W4 /WX'`,
+    build_w4: plugin-main, engine, settings, platform-win, core, tests) ->
+    exit 0, 0 warnings. Qt C++ TUs in a separate `/W4` (no /WX) run
+    (build_w4cpp): 0 warning lines total - our C++ code is /W4-clean and no
+    Qt6 header noise appeared either.
+  - `ctest --test-dir build_x64 -C RelWithDebInfo` -> "100% tests passed, 0
+    tests failed out of 1" (exit 0).
+  - clang-format 19.1.1 `--dry-run -Werror` over all new/changed C/C++
+    sources -> clean (violations fixed with `-i`, then re-gated).
+  - gersemi 0.29.2 `--check CMakeLists.txt` -> exit 0.
+- Deviations from the handoff:
+  - Names per the owner decision (KB plugin-name): hotkeys
+    `ReplayToDisk.Save`/`ReplayToDisk.Toggle` (locale `Hotkey.Save`/
+    `Hotkey.Toggle`), Tools item "Replay to Disk...", dialog/dock title
+    "Replay to Disk", dock id `replay_to_disk_dock` (handoff
+    `RollingReplay.*`/"Rolling Replay..." superseded).
+  - New UI bridge `src/plugin/plugin-ui.h` (implemented in plugin-main.c, so
+    `g_settings`, the start cache and the OBS-33 recording-path resolver live
+    in one place): `rr_plugin_get/set_settings` (set = clamp + `rr_settings_save`
+    + invalidate the resolved-folder cache), `rr_plugin_effective_dirs` (the
+    one resolver behind the autostart/selftest paths and the dialog's greyed
+    defaults + validation), `rr_plugin_start/stop/save/wait_off`. The dialog
+    and dock never touch engine internals. Toggle hotkey: state OFF (an error
+    ends in OFF with `last_error` set) -> `rr_plugin_start()` (fresh settings
+    snapshot, folders resolved on the UI thread); otherwise stop.
+  - Bug fixed while wiring the toggle: WP3's `start_from_settings` cached only
+    the resolved folders into `g_start_cfg`, so a PROFILE_CHANGED autostart
+    restarted from a zeroed config (clamp: 30 s window, 1000 kbps). It now
+    caches the full resolved snapshot.
+  - `extern "C"` guards added to `core/paths.h`, `core/space.h`,
+    `core/settings-clamp.h` and `plugin/settings.h` so the C++ UI TUs link the
+    C definitions (core stays pure C).
+  - Dialog details beyond the handoff words: the minutes+seconds spins are one
+    value (clamped through `rr_settings_clamp_window_sec`); the encoder combo
+    = "Automatic" + h264/hevc/av1 video encoders passing the 5.8 availability
+    rule, plus a kept "(not available)" entry for a configured encoder that
+    currently fails it (Apply never silently rewrites an explicit choice);
+    the inactive rate-control spin is disabled but still saved; unchecking the
+    last audio track is refused (mask stays >= 1 bit); the restart prompt fires
+    only when the state is not OFF and the settings actually changed.
+  - Dock: one multi-line status label + Start/Stop + Save, same 500 ms QTimer;
+    Save enabled only while BUFFERING (the engine ignores it otherwise anyway).
+  - All strings in `data/locale/en-US.ini` via `obs_module_text` (~45 keys);
+    `PluginName` already read "Replay to Disk" (unchanged).
+- Open problems:
+  - The four acceptance lines are PENDING solely because of the host wedge;
+    the recipe above is the full post-reboot re-verify.
+  - `rr_settings_save` now has an in-app caller, but its write path runs for
+    the first time inside the pending manual test (survive-restart box).
+  - `rolling_replay_saved` still has no in-app subscriber (the UI refreshes
+    via the QTimer); the signal stays for scripts.
