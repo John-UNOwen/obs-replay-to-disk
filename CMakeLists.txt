@@ -66,7 +66,13 @@ endif()
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.c src/plugin/engine.c src/plugin/platform-win.c src/plugin/plugin-ui.h src/plugin/settings.c
+  PRIVATE
+    src/plugin-main.c
+    src/plugin/engine.c
+    src/plugin/platform-win.c
+    src/plugin/plugin-ui.h
+    src/plugin/rename.c
+    src/plugin/settings.c
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
@@ -77,6 +83,11 @@ if(ENABLE_TESTS)
   add_executable(test_core tests/test_core.c)
   target_link_libraries(test_core PRIVATE rr_core)
   add_test(NAME core COMMAND test_core)
+
+  # The exclusive save rename (D13 no-clobber), testable without libobs.
+  add_executable(test_rename tests/test_rename.c src/plugin/rename.c)
+  target_include_directories(test_rename PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  add_test(NAME rename COMMAND test_rename)
 
   # The rr_remux CLI (same code as the plugin's save step) so the remux path can
   # be exercised outside OBS.

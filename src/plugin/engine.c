@@ -24,6 +24,7 @@
 
 #include "engine.h"
 #include "platform-win.h"
+#include "rename.h"
 #include "core/ledger.h"
 #include "core/paths.h"
 #include "core/space.h"
@@ -1033,12 +1034,27 @@ static void save_drain(uint64_t t_req, uint64_t *window_end, bool *stopped)
 		enqueue_cmd(&deferred[i]);
 }
 
+/* Strip the ".mp4" of a final path into `stem` (D13 suffix policy: the
+ * candidates are "<stem>_N.mp4", N from 2). False when final_path does not
+ * end in ".mp4". Shared by build_final_path and rename_part_exclusive. */
+static bool mp4_stem(const char *final_path, char *stem, size_t sz)
+{
+	snprintf(stem, sz, "%s", final_path);
+	char *dot = strrchr(stem, '.');
+	if (!dot || strcmp(dot, ".mp4") != 0)
+		return false;
+	*dot = 0;
+	return true;
+}
+
 /* 5.6 step 7: final path from the filename format, with _2/_3/… suffixes
  * while the plain name exists (D13's rename target). The generated name must
  * be a bare file name (core/paths): os_generate_formatted_filename does not
  * strip '/', '\' or ':' from a crafted format, and out_dir + '\' + name would
  * then escape the output folder. An unsafe name falls back to the default
- * format with a warning. */
+ * format with a warning. This stat pass is only advisory (the name is needed
+ * before the part file is written); rename_part_exclusive below enforces
+ * no-clobber at the rename itself. */
 static bool build_final_path(const char *out_dir, const char *fmt, char *final_path, size_t sz)
 {
 	char *fname = os_generate_formatted_filename("mp4", false, fmt);
@@ -1060,10 +1076,8 @@ static bool build_final_path(const char *out_dir, const char *fmt, char *final_p
 		return true;
 
 	char stem[RR_PATHLEN];
-	snprintf(stem, sizeof(stem), "%s", final_path);
-	char *dot = strrchr(stem, '.');
-	if (dot && strcmp(dot, ".mp4") == 0)
-		*dot = 0;
+	if (!mp4_stem(final_path, stem, sizeof(stem)))
+		return false;
 	for (int n = 2; n < 1000; n++) {
 		char cand[RR_PATHLEN + 8];
 		snprintf(cand, sizeof(cand), "%s_%d.mp4", stem, n);
@@ -1071,6 +1085,42 @@ static bool build_final_path(const char *out_dir, const char *fmt, char *final_p
 			snprintf(final_path, sz, "%s", cand);
 			return true;
 		}
+	}
+	return false;
+}
+
+/* 5.6 step 7 rename (D13, no-clobber): the name was chosen before the remux,
+ * and another program (or a second OBS --multi sharing the output folder) can
+ * create that exact name while the part file is written. os_rename would
+ * silently replace it (MoveFileExW with MOVEFILE_REPLACE_EXISTING), so the
+ * rename itself must refuse an existing target: rr_rename_exclusive is the
+ * race-free existence check, and on refusal the save walks the _N suffixes
+ * like build_final_path does. On success final_path holds the name used. */
+static bool rename_part_exclusive(const char *part_path, char *final_path, size_t sz)
+{
+	int rn = rr_rename_exclusive(part_path, final_path);
+	if (rn == 0)
+		return true;
+	if (rn < 0)
+		return false;
+
+	char taken[RR_PATHLEN];
+	snprintf(taken, sizeof(taken), "%s", final_path);
+	char stem[RR_PATHLEN];
+	if (!mp4_stem(taken, stem, sizeof(stem)))
+		return false;
+
+	for (int n = 2; n < 1000; n++) {
+		char cand[RR_PATHLEN + 8];
+		snprintf(cand, sizeof(cand), "%s_%d.mp4", stem, n);
+		rn = rr_rename_exclusive(part_path, cand);
+		if (rn == 0) {
+			obs_log(LOG_INFO, "engine: save: %s appeared while saving, wrote to %s instead", taken, cand);
+			snprintf(final_path, sz, "%s", cand);
+			return true;
+		}
+		if (rn < 0)
+			return false;
 	}
 	return false;
 }
@@ -1186,7 +1236,7 @@ static void handle_save(void)
 					const double took_s = (double)(os_gettime_ns() - t0) / 1e9;
 
 					ok = (rr_ret == 0);
-					if (ok && os_rename(part_path, final_path) != 0) {
+					if (ok && !rename_part_exclusive(part_path, final_path, sizeof(final_path))) {
 						ok = false;
 						snprintf(rerr, sizeof(rerr), "could not rename the part file");
 					}
