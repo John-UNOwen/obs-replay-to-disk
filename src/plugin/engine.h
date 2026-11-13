@@ -1,6 +1,10 @@
 /* engine.h — buffer engine interface (handoff 5.10; states 5.3).
  * All functions are called from the UI thread, are thread-safe and return at
  * once; the worker thread owns the encoders, the output, the ledger (D5).
+ * Once rr_engine_shutdown begins, every entry point here is a no-op until the
+ * DLL unmaps: OBS 33 has no proc_handler_remove, so the global
+ * rolling_replay_save proc stays callable through the final unload window and
+ * must not reach the engine state after shutdown started.
  * License: GPL-2.0-or-later.
  */
 #pragma once

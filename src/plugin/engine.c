@@ -85,8 +85,9 @@ static CRITICAL_SECTION st_cs;
 static struct rr_status g_status; /* the mutex-guarded snapshot (5.10) */
 
 static HANDLE g_thread;
-static volatile LONG g_quit;        /* QUIT requested (atomic) */
-static volatile LONG g_save_cancel; /* a video reset cancels the running save (B8/D16) */
+static volatile LONG g_quit;          /* QUIT requested (atomic) */
+static volatile LONG g_save_cancel;   /* a video reset cancels the running save (B8/D16) */
+static volatile LONG g_shutting_down; /* rr_engine_shutdown has begun: public entry points no-op */
 static bool g_inited, g_shutdown_done;
 
 /* ------------------------------------------------------ worker-only state */
@@ -1473,6 +1474,19 @@ void rr_engine_init(void)
 
 void rr_engine_shutdown(void)
 {
+	/* OBS 33 has no proc_handler_remove, so the global rolling_replay_save
+	 * proc (plugin-main.c) stays callable until the instant before this DLL
+	 * is unmapped. Set the flag before anything else: the public entry
+	 * points below then return at once instead of enqueueing into a queue
+	 * whose worker is already joined. It guards only the entry points,
+	 * never enqueue_cmd itself — shutdown still needs its CMD_QUIT, and the
+	 * file_changed/stop signal handlers stay live on libobs threads until
+	 * the worker disconnects them. The critical sections are deliberately
+	 * never deleted: such a handler may be inside enqueue_cmd at any point
+	 * up to the unmap, so "alive for the whole DLL lifetime" is what the
+	 * unmap itself relies on. */
+	InterlockedExchange(&g_shutting_down, 1);
+
 	if (!g_inited)
 		return;
 
@@ -1510,6 +1524,10 @@ void rr_engine_start(const struct rr_config *cfg)
 {
 	if (!g_inited || !g_thread || !cfg)
 		return;
+	if (InterlockedCompareExchange(&g_shutting_down, 0, 0) != 0) {
+		obs_log(LOG_INFO, "engine: START ignored (shutting down)");
+		return;
+	}
 
 	struct rr_cmd cmd = {0};
 	cmd.type = CMD_START;
@@ -1524,7 +1542,7 @@ void rr_engine_start(const struct rr_config *cfg)
 
 void rr_engine_stop(void)
 {
-	if (!g_inited)
+	if (!g_inited || InterlockedCompareExchange(&g_shutting_down, 0, 0) != 0)
 		return;
 	struct rr_cmd cmd = {0};
 	cmd.type = CMD_STOP;
@@ -1535,6 +1553,10 @@ void rr_engine_save(void)
 {
 	if (!g_inited)
 		return;
+	if (InterlockedCompareExchange(&g_shutting_down, 0, 0) != 0) {
+		obs_log(LOG_INFO, "engine: SAVE ignored (shutting down)");
+		return;
+	}
 	struct rr_cmd cmd = {0};
 	cmd.type = CMD_SAVE;
 	enqueue_cmd(&cmd);
@@ -1568,14 +1590,16 @@ static bool wait_off_for(uint32_t timeout_ms)
 
 bool rr_engine_wait_off(uint32_t timeout_ms)
 {
-	if (!g_inited)
+	/* During shutdown the engine is as off as it gets: report OFF at once
+	 * instead of polling a joined worker through guarded getters. */
+	if (!g_inited || InterlockedCompareExchange(&g_shutting_down, 0, 0) != 0)
 		return true;
 	return wait_off_for(timeout_ms);
 }
 
 bool rr_engine_halt_for_video_reset(void)
 {
-	if (!g_inited)
+	if (!g_inited || InterlockedCompareExchange(&g_shutting_down, 0, 0) != 0)
 		return true;
 
 	/* The stop request goes in before the state is sampled, so a SAVE that
@@ -1626,7 +1650,7 @@ void rr_engine_get_status(struct rr_status *out)
 {
 	if (!out)
 		return;
-	if (!g_inited) {
+	if (!g_inited || InterlockedCompareExchange(&g_shutting_down, 0, 0) != 0) {
 		memset(out, 0, sizeof(*out));
 		return;
 	}
