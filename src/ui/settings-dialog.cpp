@@ -406,6 +406,9 @@ bool ReplayToDiskDialog::apply()
 	case RR_PATH_NOT_ABSOLUTE:
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.BufferRelative"));
 		return false;
+	case RR_PATH_DEVICE_PATH:
+		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.BufferDevicePath"));
+		return false;
 	default: /* RR_PATH_EMPTY: neither configured nor resolvable */
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.BufferNotResolved"));
 		return false;
@@ -418,6 +421,9 @@ bool ReplayToDiskDialog::apply()
 		break;
 	case RR_PATH_DRIVE_ROOT:
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.OutputDriveRoot"));
+		return false;
+	case RR_PATH_DEVICE_PATH:
+		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.OutputDevicePath"));
 		return false;
 	default: /* RR_PATH_NOT_ABSOLUTE */
 		QMessageBox::warning(this, windowTitle(), rr_qtext("Error.OutputRelative"));

@@ -605,6 +605,10 @@ static bool start_session(const struct rr_config *cfg_in)
 		case RR_PATH_SAME_AS_OUTPUT:
 			snprintf(msg, sizeof(msg), "buffer folder is the same as the output folder");
 			break;
+		case RR_PATH_DEVICE_PATH:
+			snprintf(msg, sizeof(msg),
+				 "buffer folder is a Windows device path (\\\\?\\, \\\\.\\ or \\??\\)");
+			break;
 		default:
 			snprintf(msg, sizeof(msg), "buffer folder is not an absolute path");
 			break;
@@ -623,6 +627,9 @@ static bool start_session(const struct rr_config *cfg_in)
 			snprintf(msg, sizeof(msg), "output folder is not configured (no OBS recording path)");
 		else if (oerr == RR_PATH_DRIVE_ROOT)
 			snprintf(msg, sizeof(msg), "output folder is a drive root");
+		else if (oerr == RR_PATH_DEVICE_PATH)
+			snprintf(msg, sizeof(msg),
+				 "output folder is a Windows device path (\\\\?\\, \\\\.\\ or \\??\\)");
 		else
 			snprintf(msg, sizeof(msg), "output folder is not an absolute path");
 		fail_start(msg);

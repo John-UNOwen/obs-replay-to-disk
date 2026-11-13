@@ -674,6 +674,65 @@ static void buffer_dir_dot_segments_are_folded(void)
 	assert(rr_paths_check_buffer_dir("\\\\server", "C:\\out") == RR_PATH_OK);
 }
 
+static void buffer_dir_windows_alias_is_refused(void)
+{
+	/* Windows strips a name's trailing dots and spaces, so all of these
+	 * spellings ARE the output folder and must not pass as "different". */
+	assert(rr_paths_check_buffer_dir("D:\\out.", "D:\\out") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("D:\\out ", "D:\\out") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("D:\\out ..", "D:\\out") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("D:\\OUT. ", "d:\\out\\") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("D:\\videos\\sub ..", "D:\\videos\\sub") == RR_PATH_SAME_AS_OUTPUT);
+	assert(rr_paths_check_buffer_dir("D:\\out\\x.", "D:\\out\\x") == RR_PATH_SAME_AS_OUTPUT);
+
+	/* Trailing junk that strips away is refused the same way, and stripping
+	 * can expose the drive root behind it ("C:\out\.. "). */
+	assert(rr_paths_check_buffer_dir("C:\\rec\\.. ", "C:\\out") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("C:\\videos\\.. ") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("D:\\videos\\sub. ") == RR_PATH_OK);
+
+	/* Dots inside a name and before the end survive stripping. */
+	assert(rr_paths_check_buffer_dir("D:\\a.b.c", "D:\\a.b") == RR_PATH_OK);
+	assert(rr_paths_check_buffer_dir("D:\\a.b.c", "D:\\a.b.c.") == RR_PATH_SAME_AS_OUTPUT);
+}
+
+static void buffer_dir_device_path_is_refused(void)
+{
+	/* Device-namespace spellings alias ordinary folders ("\\?\C:\out"
+	 * addresses "C:\out") and bypass the textual fold, so every spelling
+	 * is refused on either side of the comparison. */
+	assert(rr_paths_check_buffer_dir("\\\\?\\C:\\buffer", "C:\\out") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_buffer_dir("\\\\.\\C:\\buffer", "C:\\out") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_buffer_dir("\\??\\C:\\buffer", "C:\\out") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_buffer_dir("\\\\?\\C:\\out", "C:\\out") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_buffer_dir("C:\\buffer", "\\\\?\\C:\\out") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_buffer_dir("\\??\\C:\\buffer", "") == RR_PATH_DEVICE_PATH);
+
+	assert(rr_paths_check_output_dir("\\\\?\\C:\\") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_output_dir("\\\\.\\C:\\") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_output_dir("\\??\\C:\\") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_output_dir("\\\\?\\C:\\Windows") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_output_dir("\\\\?\\UNC\\server\\share") == RR_PATH_DEVICE_PATH);
+	assert(rr_paths_check_output_dir("\\\\.\\COM1") == RR_PATH_DEVICE_PATH);
+}
+
+static void unc_share_root_is_refused(void)
+{
+	/* The stale-part purge and the saves would act at the root of a whole
+	 * network volume — refused like "C:\". */
+	assert(rr_paths_check_output_dir("\\\\server\\share") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("\\\\server\\share\\") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_output_dir("\\\\server\\share\\sub\\..") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_buffer_dir("\\\\server\\share", "C:\\out") == RR_PATH_DRIVE_ROOT);
+	assert(rr_paths_check_buffer_dir("\\\\server\\share\\ ", "\\\\server\\share") == RR_PATH_DRIVE_ROOT);
+
+	/* Below the share, or above it (the server listing is a raw-fallback
+	 * spelling today), the old rules stand. */
+	assert(rr_paths_check_output_dir("\\\\server\\share\\record") == RR_PATH_OK);
+	assert(rr_paths_check_buffer_dir("\\\\server\\share\\rec", "\\\\other\\share\\rec") == RR_PATH_OK);
+	assert(rr_paths_check_buffer_dir("\\\\server", "C:\\out") == RR_PATH_OK);
+}
+
 static void output_dir_absolute_not_drive_root(void)
 {
 	/* Empty means "the OBS recording path", resolved by the caller. */
@@ -782,6 +841,9 @@ int main(void)
 	RUN(buffer_dir_drive_root_is_refused);
 	RUN(buffer_dir_equal_to_output_dir_is_refused);
 	RUN(buffer_dir_dot_segments_are_folded);
+	RUN(buffer_dir_windows_alias_is_refused);
+	RUN(buffer_dir_device_path_is_refused);
+	RUN(unc_share_root_is_refused);
 	RUN(output_dir_absolute_not_drive_root);
 	RUN(segment_name_pattern);
 	RUN(save_filename_must_be_bare);

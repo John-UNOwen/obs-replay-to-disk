@@ -27,15 +27,36 @@ static bool path_is_absolute(const char *p)
 	return isalpha((unsigned char)p[0]) && p[1] == ':' && is_sep(p[2]);
 }
 
-/* True for "C:\", "C:/", "D:\" (also with extra trailing slashes) and "/".
- * "C:" alone is drive-relative, not a root. */
+/* True for "C:\", "C:/", "D:\" (also with extra trailing slashes) and "/",
+ * and for a UNC share root "\\server\share" (likewise with trailing
+ * slashes): the share root is the whole network volume for the engine's
+ * purges, so it is refused like a drive root. Below the share
+ * ("\\server\share\folder") or above it ("\\server", the server listing)
+ * it is not a root. "C:" alone is drive-relative, not a root. */
 static bool path_is_drive_root(const char *p)
 {
 	const char *rest;
 
 	if (is_sep(p[0])) {
+		if (p[0] == '\\' && p[1] == '\\') {
+			/* UNC: exactly the two segments "server\share" are the
+			 * root; a third segment is inside the share. */
+			int segs = 0;
+			rest = p + 2;
+			while (*rest) {
+				while (*rest && is_sep(*rest))
+					rest++;
+				if (!*rest)
+					break;
+				if (++segs > 2)
+					return false;
+				while (*rest && !is_sep(*rest))
+					rest++;
+			}
+			return segs == 2;
+		}
 		if (p[0] == '\\')
-			return p[1] == 0; /* "\\" alone; "\\server\share" is UNC, not a root */
+			return p[1] == 0; /* "\\" alone (a raw-fallback spelling) */
 		rest = p + 1;
 	} else {
 		rest = p + 2; /* C: */
@@ -44,6 +65,22 @@ static bool path_is_drive_root(const char *p)
 	while (*rest && is_sep(*rest))
 		rest++;
 	return *rest == 0;
+}
+
+/* Windows device-namespace prefixes: "\\?\" (verbatim/long path), "\\.\"
+ * (device) and "\??\" (the NT namespace as seen from user mode). They are
+ * textual aliases of ordinary folders ("\\?\C:\out" addresses "C:\out")
+ * that a textual comparison cannot follow, they bypass the root checks
+ * above, and neither a folder picker nor the OBS recording path ever
+ * produces one — so both checkers refuse them outright. '/' counts as '\':
+ * the Win32 parser folds the separators before recognizing the prefix. */
+static bool path_is_device_path(const char *p)
+{
+	if (!is_sep(p[0]))
+		return false;
+	if (is_sep(p[1]))
+		return p[2] == '?' || p[2] == '.'; /* "\\?\..." or "\\.\..." */
+	return p[1] == '?' && p[2] == '?';         /* "\??\..." */
 }
 
 static size_t trimmed_len(const char *p)
@@ -73,10 +110,12 @@ enum { RR_PATH_CANON_MAX = 4096 };
 /* Canonical spelling for comparison: one separator style per root kind, empty
  * and "." segments dropped, ".." pops a segment and clamps at the root
  * (Windows: "cd .." on "C:\" stays on "C:\", out of "\\server\share" stays in
- * the share). Keeps the root spelling: "C:\", "\\server\share", "/". Purely
- * textual — like GetFullPathNameW, no short-name or case resolution, and no
- * CWD substitution for relative paths. Returns false for relative, over-long
- * or degenerate input; the caller then compares the raw text as before. */
+ * the share), and each name stored with Windows' trailing dots and spaces
+ * stripped ("out." and "out " are the folder "out"). Keeps the root spelling:
+ * "C:\", "\\server\share", "/". Purely textual — like GetFullPathNameW, no
+ * short-name or case resolution, and no CWD substitution for relative paths.
+ * Returns false for relative, over-long or degenerate input; the caller then
+ * compares the raw text as before. */
 static bool paths_canonicalize(char *out, size_t out_size, const char *in)
 {
 #define RR_MAX_SEGS 1024
@@ -106,16 +145,26 @@ static bool paths_canonicalize(char *out, size_t out_size, const char *in)
 		const char *start = p;
 		while (*p && !is_sep(*p))
 			p++;
-		const size_t len = (size_t)(p - start);
-
+		size_t len = (size_t)(p - start);
 		if (len == 0)
 			continue;
-		const bool dot = len == 1 && start[0] == '.';
-		const bool dotdot = len == 2 && start[0] == '.' && start[1] == '.';
-		if (dot || dotdot) {
+
+		/* Windows strips a name's trailing dots and spaces before
+		 * resolving it, so "out.", "out " and "out .." all name the
+		 * folder "out". What the stripping leaves empty was only dots
+		 * and spaces, and keeps its directory meaning: up to one dot
+		 * is this folder ".", two or more are the parent ".." (never
+		 * under-count ".." — it would hide a shallower folder). */
+		while (len > 0 && (start[len - 1] == '.' || start[len - 1] == ' '))
+			len--;
+		if (len == 0) {
+			size_t dots = 0;
+			for (const char *q = start; q < p; q++)
+				if (*q == '.')
+					dots++;
 			if (unc && nseg < 2)
 				return false; /* "." or ".." where server\share belongs */
-			if (dotdot && nseg > nprot)
+			if (dots >= 2 && nseg > nprot)
 				nseg--;
 			continue;
 		}
@@ -171,6 +220,8 @@ enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char 
 		return RR_PATH_EMPTY;
 	if (!path_is_absolute(buffer_dir))
 		return RR_PATH_NOT_ABSOLUTE;
+	if (path_is_device_path(buffer_dir))
+		return RR_PATH_DEVICE_PATH;
 
 	/* Compare canonical spellings so "C:\rec\..\rec" cannot hide the output
 	 * folder — or itself hide a drive root — from the checks below. */
@@ -183,6 +234,8 @@ enum rr_path_error rr_paths_check_buffer_dir(const char *buffer_dir, const char 
 	/* An empty output_dir means "OBS's recording path", resolved by the caller;
 	 * it cannot be compared here. */
 	if (output_dir && output_dir[0]) {
+		if (path_is_device_path(output_dir))
+			return RR_PATH_DEVICE_PATH;
 		const char *out = out_canon;
 		if (!paths_canonicalize(out_canon, sizeof(out_canon), output_dir))
 			out = output_dir;
@@ -199,6 +252,8 @@ enum rr_path_error rr_paths_check_output_dir(const char *output_dir)
 		return RR_PATH_OK;
 	if (!path_is_absolute(output_dir))
 		return RR_PATH_NOT_ABSOLUTE;
+	if (path_is_device_path(output_dir))
+		return RR_PATH_DEVICE_PATH;
 
 	/* Same canonical spelling as the buffer check, so a folder that folds
 	 * away ("D:\videos\..") cannot pass as anything but the drive root it
