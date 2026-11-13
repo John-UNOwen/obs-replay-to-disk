@@ -817,3 +817,235 @@
   is not fixable from the plugin; `docs/manual-tests.md` and the README carry it
   as a limitation. `verify_remux.py` is not in the repo, so the packet-exact save
   check is not repeatable here (see WP6 Deviations).
+
+## Post-checkup fixes round 2: 15 problems, all fixed — rig-verified 2026-11-13
+
+- Base and commits: the round-2 checkup ran on `main` at `3a25f52`, and the
+  annotated tag `v0.1.0` stays on that commit — this round does not move it (the
+  parent retags after convergence). One commit per fix, oldest first:
+  `ffb4700` (1) `2d6111b` (2) `1e66a4c` (3) `dd1b9eb` (6) `507de8e` (7)
+  `58b766d` (10) `cca62e1` (12) `c1a5b8c` (14) `69b7a7e` (15), then
+  `433a7e0` (4+5, the one folder-rule change), `58ebf7c` (8), `d4a4b03` (9),
+  `7cef324` (11) and `deed83c` (13). Issues 4 and 5 share `433a7e0`: they are
+  one change to the folder rules (trailing-dot/space aliases, device-namespace
+  paths and UNC share roots). These last five first landed as a single lumped
+  commit `62f0d93`, which the follow-up review flagged against the
+  one-commit-per-fix rule; the history was rebuilt to split it per fix (the
+  final tree is identical, and each split commit builds green with ctest 2/2
+  and clang-format clean on its own). Rig = portable OBS 33.0.1 under
+  `.testrig`, encoder `obs_qsv11_v2`, 30/1 fps; OBS logs under
+  `.testrig/obs/config/obs-studio/logs/`, run dirs under `.testrig/runs/`.
+- Gates re-run on the fixed tree (working tree = `deed83c` plus these docs):
+  `cmake --preset windows-x64 -DENABLE_TESTS=ON` exit 0;
+  `cmake --build --preset windows-x64 --config RelWithDebInfo` exit 0 with 0
+  `: warning ` lines; `ctest --test-dir build_x64 -C RelWithDebInfo` →
+  `100% tests passed, 0 tests failed out of 2` (`core`, `rename`); the two strict
+  caches rebuild exit 0 with 0 warning lines (`build_check`,
+  `CMAKE_COMPILE_WARNING_AS_ERROR=ON`; `build_w4`, C flags `/W4 /WX`);
+  clang-format 19.1.1 `--dry-run -Werror` over the changed `src/**` and
+  `tests/test_core.c` exit 0; gersemi 0.29.2 `--check CMakeLists.txt` exit 0.
+- Rig regression, WP3 buffer suite (run `r2chk-wp3`, log `2026-11-13
+  17-59-09.txt`, `RR_SELFTEST=buffer WINDOW=30 RUN=120`): `buffer started`
+  17:59:15.231; `segment closed` at 10.00 s intervals (`dur=11.46s` first, then
+  `10.02, 10.00, 9.98, 10.01, 10.00`); first `pruned:` 18:00:16.726 = +61.5 s
+  after start; `engine: purged 6 segment file(s) on stop` then `selftest
+  finished: ok buffer ran 120s` 18:01:15.734; 0 `rrseg_*.mkv` left and
+  `keep-me.txt` survives in the buffer dir; `Number of memory leaks: 1` = the
+  stock baseline on the used config.
+- Rig regression, WP4 save suite (run `r2chk-wp4`, log `2026-11-13
+  18-01-28.txt`, `RR_SELFTEST=save WINDOW=30 SAVES=20,60 SCOPE=window`): `save
+  started: segments=2 inpoint=0.00s` 18:01:54.182 → `...18-01-54.mp4 frames=600
+  duration=20.00s took=0.11s warnings=0`; `save started: segments=4
+  inpoint=10.00s` 18:02:34.182 → `...18-02-34.mp4 frames=930 duration=31.00s
+  took=0.12s warnings=0`; ffprobe format durations 20.032000 s (band 19–21 s)
+  and 31.000000 s (band 30.0–31.1 s); `purged 6 segment file(s) on stop`,
+  `selftest finished: ok buffer ran 100s`, `Number of memory leaks: 1`.
+
+- 1. `since_last_save` advanced past footage it never wrote (major). Step 8 of
+  `handle_save` set `s.last_save_end_ns = window_end` on success even when the
+  selection had been cut short, so footage the clip never contained was recorded
+  as saved: the next save started at `window_end` and prune deleted the rest, all
+  under a clean `save finished: ... warnings=0`. Fix `ffb4700`: new
+  `rr_window_saved_end` (`src/core/window.c:62`) returns the end of the last
+  segment actually written — its predecessor when `rr_remux` reported
+  `skipped_tail` — or 0 (do not move) when a hole cut the run off with unsaved
+  in-window footage below it; `handle_save` advances the boundary only to that end
+  and only forward (`src/plugin/engine.c:1354-1357`). Unit-tested by the new
+  `rr_window_saved_end` asserts in `tests/test_core.c`. Rig, run `r2chk-hold3`
+  (`2026-11-13 17-56-29.txt`, `SCOPE=since_last_save SAVES=2`, a tool holding
+  each just-rotated `rrseg_*.mkv` with share 0 across the boundary probe): save 1
+  `save started: segments=2 inpoint=0.00s` → `save finished:
+  ...Replay_...17-56-56.mp4 frames=330 duration=11.00s warnings=0`; after the
+  hold released, save 2 `save started: segments=3 inpoint=0.00s` → `...
+  Replay_...17-57-16.mp4 frames=570 duration=19.00s warnings=0`. The two clips
+  fill the window back to back — ffprobe 11.029333 s + 19.008000 s = 30.04 s, so
+  nothing was skipped — and `engine: segment not released within 2 s:
+  ...rrseg_...17-57-15.mkv` shows a real hold landed inside the run.
+- 2. Stop purge was not aggregate-bounded (minor). The stop/QUIT purge retried
+  each locked segment for ~2 s and so cost ~2 s per locked file; a buffer folder
+  of externally held files (backup/sync tools, media preview panes) froze OBS's
+  exit for minutes at the 1800 s default, and shutdown then joins on the UI
+  thread behind it. Fix `2d6111b`: `purge_buffer_dir` shares one
+  `RR_PURGE_TOTAL_MS` (5 s) deadline across the whole pass
+  (`src/plugin/engine.c:261`) — past it every remaining file gets one unlink and
+  is left behind with a warning, re-purged on the next start — and `stop_session`
+  reports the skipped count. No unit test (worker-thread path); proven on the
+  rig. Before/after with every just-closed segment held open: run `r2f2-pre3`
+  (`hold-trace.txt` 16 files `HELD`) closed via WM_CLOSE in `OBS_EXITED after
+  32.4 s` (`close-measure.txt`); run `r2f2-post` (fixed build, `hold-trace.txt`
+  15 files held) closed in `OBS_EXITED after 5.5 s` — the 5 s budget bounds the
+  stop. Those two OBS logs are gone; the per-run `close-measure.txt` and
+  `hold-trace.txt` are what survive.
+  - Corrects the round-1 item 6 record (`195da3c`): it called the QUIT path
+    "bounded by the QUIT path itself ... purge gives up on locked files after ~2 s
+    each", which was true only per file. With `2d6111b` the purge is bounded in
+    aggregate (5 s total), so the join behind it is bounded too.
+- 3. Dead `stop_requested` field (minor). `s.stop_requested` was written in
+  `stop_session` and cleared, but read nowhere; the stop/wait logic keys off
+  `s.stop_seen` alone. Fix `1e66a4c` deletes the field and both writes. Verified:
+  `git grep stop_requested` over `src/` is empty after the commit, and the full
+  build plus both strict caches rebuild clean (nothing else depended on it).
+- 4. Folder rules missed trailing-dot/space aliases (minor).
+  `paths_canonicalize` kept a name's trailing dots and spaces, so `D:\out.`,
+  `D:\out ` and `D:\out ..` passed `rr_paths_check_buffer_dir` as different from
+  the output folder `D:\out` even though Windows resolves all three to that
+  folder — the buffer then rolled `rrseg_*.mkv` into the output folder where
+  every stop purge deletes them. Fix `433a7e0`: the canonicalizer now strips each
+  name's trailing dots and spaces, keeping `.` and `..` meaning (stripping to
+  empty keeps the directory's level). Unit-tested in
+  `buffer_dir_windows_alias_is_refused` (`D:\out.`, `D:\out `, `D:\out ..`,
+  `D:\OUT. `, a mid-path `sub ..`, and stripping that exposes the drive root
+  behind it). Proven by the unit test over the same checker the dialog and
+  `start_session` call; no separate rig start was run for these spellings.
+- 5. Folder rules missed device paths and UNC share roots (minor). Device
+  spellings `\\?\C:\`, `\\.\C:\` and `\??\C:\` alias ordinary folders yet bypass
+  the root checks, and `\\server\share` — a whole network volume — was accepted
+  where a drive root is refused, so the `*.rrpart` purge acted at a share root.
+  Fix `433a7e0`: `path_is_device_path` (`src/core/paths.c:84`) with a new
+  `RR_PATH_DEVICE_PATH` returned by both checkers (`paths.c:230,244,262`), and
+  `rr_paths_is_drive_root` (`paths.c:39`) now answers true for the UNC share root
+  (`\\server\share` yes, `\\server` and `\\server\share\sub` no); the dialog and
+  `start_session` map the new error to their own messages
+  (`Error.BufferDevicePath`, `Error.OutputDevicePath`). Unit-tested in
+  `buffer_dir_device_path_is_refused` and `unc_share_root_is_refused`.
+- 6. The round-1 fix-7 entry misdescribed the code (docs, minor). It read
+  "GetFullPathNameW with a manual fallback", but `paths_canonicalize` is a purely
+  textual fold and never calls the Win32 API. Corrected in place by `dd1b9eb`:
+  the entry now names the textual fold and says what it does not do (trailing
+  dots and spaces — which issue 4 then fixed).
+- 7. Start purge deleted another instance's live save part (minor).
+  `start_session` deleted every `*.rrpart` in the output folder, so a second OBS
+  `--multi` starting while a first instance sat between remux-end and the
+  exclusive rename deleted that save's finished part and lost its clip. Fix
+  `507de8e`: a part is stale by last write, not by existence — one written within
+  `RR_PART_STALE_SECS` (120 s) is kept and logged, only older leftovers deleted
+  (`src/plugin/engine.c:337`). The honest cost is in the code comment: a crashed
+  run's leftover is purged no earlier than one window after its last write, and
+  only by an instance that restarts. Rig, run `r2f7` (`2026-11-13
+  17-12-48.txt`, three `*.rrpart` stubs planted at 6 s / 106 s / older): the
+  start logs `engine: part kept, written 6 s ago: ...Replay_fresh_...rrpart`,
+  `engine: part kept, written 106 s ago: ...Replay_mid_...rrpart`, and
+  `engine: removed stale part: ...Replay_old_...rrpart`.
+- 8. `filename_format` accepted Windows-illegal names (minor).
+  `rr_paths_is_safe_filename` rejected only `/`, `\` and `:`, so `Best Moment?`
+  passed the dialog and settings load and every save then failed at the file open
+  (`ERROR_INVALID_NAME`) with no config-time warning. Fix `58ebf7c`: the checker
+  now rejects the whole illegal set `< > : " | ? *` plus `/` `\`, a trailing dot
+  or space, and the reserved device bases `CON PRN AUX NUL COM1-9 LPT1-9` (but
+  not `COM10`, `LPT0`, or those words as a substring) (`src/core/paths.c:320,376`);
+  settings load falls back to the default with a warning when a hand-edited
+  `settings.json` bypasses the dialog (`src/plugin/settings.c`, log `settings:
+  filename_format '<name>' is not a usable Windows file name, falling back to the
+  default`). Unit-tested by the new asserts in `save_filename_must_be_bare` (the
+  report's `Best Moment?` spelling among them). The dialog Apply message and a
+  `docs/manual-tests.md` box carry the user-facing path; the settings-load
+  fallback and the `ERROR_INVALID_NAME` cases are unit + code path, not run on
+  the rig this round.
+- 9. Two suffix systems chained `_2_2` (minor). `build_final_path`'s advisory
+  name pick and `rename_part_exclusive`'s rename walk were independent, so when
+  the advisory picked `<stem>_2` and that file also appeared mid-remux, the rename
+  stripped `.mp4` from the suffixed name and wrote `<stem>_2_2.mp4`. Fix
+  `d4a4b03`: one walk, `rr_paths_take_suffix` (`src/core/paths.c:403`), which both
+  passes run over the same bare stem — `build_final_path` returns the stem and the
+  first index it did not use (`src/plugin/engine.c:1169`), and
+  `rename_part_exclusive` continues from there (`engine.c:1204`), so a taken `_2`
+  lands on `_3`, never `_2_2`. Unit-tested by
+  `save_suffix_walk_continues_the_sequence` (fresh walk starts at `_2` and skips
+  taken names; the composition where the advisory used `_2` and the rename pass
+  starts at 3 lands `_3`). The functions stay `static` in the libobs-linked
+  engine, so the engine glue itself is not unit-reachable — the round-1 `fix9r2`
+  run exercised that rename path; the `_2`→`_3` continuation is proven by the
+  unit test over the shared helper both passes now call.
+- 10. A held newest segment blocked a whole closed run (minor). When the newest
+  ENDED segment was the unclosed one (the usual just-rotated file a scanner
+  holds), `rr_window_select` broke before collecting anything and the save logged
+  `nothing to save` with a full window of closed segments below it. Fix
+  `58b766d`: such a segment above the run is skipped, not a refusal — the closed
+  run under it is hole-free footage on its own — and `handle_save` logs the
+  skipped file by name so the save is not mistaken for covering it
+  (`src/core/window.c:26-36`, `src/plugin/engine.c:1304`). Unit-tested (newest
+  hole) in `tests/test_core.c`. Rig, run `r2chk-hold2` (`2026-11-13
+  17-53-54.txt`): the save starts on the closed run and names both held files —
+  `engine: save: ...rrseg_...17-54-20.mkv is not released yet, saving the older
+  closed run` and the same for `...17-54-30.mkv`. In that run the save then fails
+  `save failed: open segment: Permission denied` because the holder had the
+  selected segment open too, a legitimately unreadable file; the clean two-save
+  recovery is run `r2chk-hold3` under issue 1.
+- 11. `path_is_drive_root("C:")` contradicted its comment (minor). The helper
+  answered `C:` a root while its comment said drive-relative `C:` is not one.
+  Unreachable through the public API (both checkers refuse `C:` earlier on the
+  absolute-path gate) but a trap for a future caller. Fix `7cef324`:
+  `rr_paths_is_drive_root` returns false for `C:` and `C:file` and is exposed for
+  testing (`src/core/paths.c:39`); the contract is asserted directly in
+  `drive_root_helper_matches_its_contract`, and the public refusal of `C:` is
+  still asserted in `output_dir_absolute_not_drive_root`.
+- 12. ctest never ran in CI (minor, improvement-class). Both ctest gates were
+  wired in CMake but no workflow configured `ENABLE_TESTS=ON` or ran `ctest`, so
+  a core or rename regression could merge on a green CI. Fix `cca62e1`: the
+  Windows build job now reconfigures `windows-ci-x64 -DENABLE_TESTS=ON`, builds
+  `test_core` and `test_rename`, puts the FFmpeg DLL dirs the tests link (read
+  from the CMake cache) on `PATH`, and runs `ctest --output-on-failure`, failing
+  the job on a non-zero exit; the macOS and Ubuntu jobs are unchanged. CI is not
+  run in this environment — the job runs the same `ctest` that passes locally
+  (100%, 2/2) and the diff was reviewed as valid YAML.
+- 13. Dialog restart was silently lost when the stop was slow (minor). The
+  Apply-restart path ran `rr_plugin_stop(); rr_plugin_wait_off(6000);
+  rr_plugin_start();` and ignored `wait_off`'s result, so a buffer not OFF within
+  6 s (a save in flight parks the STOP; a long stop outlasts the wait) had its
+  START dropped by the engine and the user was left with a stopped buffer and no
+  message. Fix `deed83c`: the START is enqueued only when `wait_off` reports OFF;
+  otherwise the dialog logs `dialog: buffer restart skipped: the buffer did not
+  stop within 6 s` and shows a box saying the buffer was not restarted (settings
+  are still saved, press Start Buffer once the status reads Off)
+  (`src/ui/settings-dialog.cpp`). There is no automated rig proof (the drop needs
+  a stop slower than the wait, which a headless harness cannot time against the
+  dialog); the code path and a `docs/manual-tests.md` box with the log line and
+  the message box carry it.
+- 14. Per-profile hotkeys leaked across profiles (minor). `load_hotkey` returned
+  early when a profile's `basic.ini` had no binding for a hotkey, so
+  `obs_hotkey_load` — the only libobs path that clears the previous profile's
+  live bindings — never ran, and a hotkey bound on profile A kept firing after a
+  switch to profile B that had none. Fix `c1a5b8c`: `obs_hotkey_load` is always
+  called, with an empty array when the profile stores no bindings
+  (`src/plugin-main.c`). Proven against vendored `libobs/obs-hotkey.c`
+  (`remove_bindings` runs only inside `obs_hotkey_load`) plus a
+  `docs/manual-tests.md` box (bind under A, switch to B, the key does nothing and
+  the Hotkeys dialog for B shows no binding); run `hotkey-empty-load`
+  (`2026-11-13 17-43-29.txt`) exercises the changed load path through a clean
+  start/stop with no crash. The cross-profile behavior itself needs a person at
+  the Hotkeys dialog to confirm.
+- 15. Stale `reference/` pointers in the shipped sources (docs, minor).
+  `remux.c`/`remux.h` pointed readers at `reference/README.md` and called remux.c
+  a port of `reference/rr_remux.c`, but `reference/` was deleted with the WP1
+  handoff. Fix `69b7a7e`: both headers now point at `docs/wp1-findings.md` and
+  `docs/STATUS.md`; `git grep reference/` over `src/` returns nothing after.
+- Honest about what is unit-only vs rig-proven. Rig-proven this round: 1, 2, 7,
+  10, and the WP3/WP4 regression. Unit-test + code-path (not separately run on
+  the rig): 4, 5, 8, 9 (engine glue is the round-1 `fix9r2` rename path; the
+  `_2`→`_3` continuation is the unit test over the shared walk), 11, 12 (CI not
+  run here), 13, and the code half of 14. The three user-facing paths that need a
+  human — issue 8's dialog Apply, issue 13's restart message, and issue 14's
+  cross-profile binding — are carried by `docs/manual-tests.md` boxes (filename
+  validation, restart-skip message, per-profile hotkey) rather than automation.
+  `verify_remux.py` is still not in the repo, so the packet-exact save check stays
+  unrepeatable here (WP6 Deviations).
