@@ -14,6 +14,7 @@
 
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <plugin-support.h> /* obs_log */
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -460,8 +461,17 @@ bool ReplayToDiskDialog::apply()
 					      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
 		if (ans == QMessageBox::Yes) {
 			rr_plugin_stop();
-			rr_plugin_wait_off(6000);
-			rr_plugin_start();
+			if (rr_plugin_wait_off(6000)) {
+				rr_plugin_start();
+			} else {
+				/* Not OFF yet (a save in flight parks the STOP, a slow stop
+				 * can outlast 6 s): the engine would drop this START as
+				 * "START ignored", silently leaving the buffer stopped. Say
+				 * so instead of pretending the restart happened. */
+				obs_log(LOG_WARNING,
+					"dialog: buffer restart skipped: the buffer did not stop within 6 s");
+				QMessageBox::warning(this, windowTitle(), rr_qtext("Restart.Failed"));
+			}
 		}
 		/* No: the settings are saved; the running buffer keeps its snapshot. */
 	}
