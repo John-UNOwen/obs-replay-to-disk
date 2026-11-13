@@ -701,10 +701,14 @@
   stacked stalls at exit and was not reproduced.
 - 7. The buffer==output rule was a raw string compare (minor): `C:\rec\..\rec`
   passed against `C:\rec`. Fix `2fc5973`: `paths_canonicalize`
-  (`src/core/paths.c:80`, GetFullPathNameW with a manual fallback) folds `.`,
-  `..`, repeated separators and slash style before the equality, absolute and
-  drive-root checks. Verified by the unit test
-  `buffer_dir_dot_segments_are_folded` (`tests/test_core.c:628`).
+  (`src/core/paths.c:80`) folds `.`, `..`, repeated separators and slash
+  style before the equality, absolute and drive-root checks. The fold is
+  purely textual — the code comment calls it "like GetFullPathNameW, no
+  short-name or case resolution", but the Win32 API is never called. This
+  entry originally read "GetFullPathNameW with a manual fallback", which
+  never matched the code; corrected after the round-2 checkup. Verified by
+  the unit test `buffer_dir_dot_segments_are_folded`
+  (`tests/test_core.c:628`).
 - 8. `output_dir` was never validated (minor): a relative value resolved against
   the OBS working directory (including the stale `*.rrpart` purge there), a drive
   root swept a whole volume. Fix `6312155`: `rr_paths_check_output_dir`
