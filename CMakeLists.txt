@@ -75,6 +75,55 @@ target_sources(
     src/plugin/settings.c
 )
 
+# Widen OBS version support (docs/STATUS.md "Widening OBS compatibility"):
+# the plugin delay-loads its three FFmpeg imports and ships the full FFmpeg
+# dependency closure inside the plugin folder. OBS's module loader maps the
+# plugin DLL fine without FFmpeg on the host (delay imports); at
+# obs_module_load, rr_ffmpeg_preload loads the closure from the plugin's own
+# directory, dependency-first (Windows only applies LOAD_LIBRARY_SEARCH_*
+# to the DLL named in LoadLibraryEx, not to that DLL's own imports). A copy
+# OBS already loaded with the same name (same FFmpeg major) is reused.
+# The closure list must stay in sync with ffmpeg-load.c.
+if(WIN32 AND FFmpeg_avformat_LIBRARY AND FFmpeg_avcodec_LIBRARY AND FFmpeg_avutil_LIBRARY)
+  get_filename_component(RR_FFMPEG_BIN_DIR "${FFmpeg_avutil_LIBRARY}" DIRECTORY)
+  set(
+    RR_FFMPEG_BUNDLE
+    avutil-60.dll
+    zlib.dll
+    swresample-6.dll
+    libx264-164.dll
+    srt.dll
+    librist.dll
+    avcodec-62.dll
+    avformat-62.dll
+  )
+  set(RR_FFMPEG_FILES "")
+  foreach(rr_dll ${RR_FFMPEG_BUNDLE})
+    if(NOT EXISTS "${RR_FFMPEG_BIN_DIR}/${rr_dll}")
+      message(
+        FATAL_ERROR
+        "FFmpeg closure member ${rr_dll} is missing from ${RR_FFMPEG_BIN_DIR}; "
+        "update the bundle list in CMakeLists.txt and ffmpeg-load.c together."
+      )
+    endif()
+    list(APPEND RR_FFMPEG_FILES "${RR_FFMPEG_BIN_DIR}/${rr_dll}")
+  endforeach()
+
+  target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin/ffmpeg-load.c)
+
+  if(MSVC)
+    get_filename_component(RR_DELAY_AVFORMAT "${FFmpeg_avformat_LIBRARY}" NAME)
+    get_filename_component(RR_DELAY_AVCODEC "${FFmpeg_avcodec_LIBRARY}" NAME)
+    get_filename_component(RR_DELAY_AVUTIL "${FFmpeg_avutil_LIBRARY}" NAME)
+    target_link_options(
+      ${CMAKE_PROJECT_NAME}
+      PRIVATE "/DELAYLOAD:${RR_DELAY_AVFORMAT}" "/DELAYLOAD:${RR_DELAY_AVCODEC}" "/DELAYLOAD:${RR_DELAY_AVUTIL}"
+    )
+  endif()
+
+  install(FILES ${RR_FFMPEG_FILES} DESTINATION "${CMAKE_PROJECT_NAME}/bin/64bit" COMPONENT Runtime)
+endif()
+
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 if(ENABLE_TESTS)
@@ -94,4 +143,12 @@ if(ENABLE_TESTS)
   add_executable(rr-remux-cli src/save/remux.c)
   target_compile_definitions(rr-remux-cli PRIVATE RR_REMUX_MAIN)
   target_link_libraries(rr-remux-cli PRIVATE FFmpeg::avformat FFmpeg::avcodec FFmpeg::avutil)
+
+  # The FFmpeg preload closure, against the real dependency folder (Windows).
+  if(WIN32 AND RR_FFMPEG_BIN_DIR)
+    add_executable(test_ffmpeg_load tests/test_ffmpeg_load.c src/plugin/ffmpeg-load.c)
+    target_include_directories(test_ffmpeg_load PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(test_ffmpeg_load PRIVATE RR_TEST_FFMPEG_DIR="${RR_FFMPEG_BIN_DIR}")
+    add_test(NAME ffmpeg_load COMMAND test_ffmpeg_load)
+  endif()
 endif()

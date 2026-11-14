@@ -8,14 +8,14 @@ This plugin was built with AI assistance.
 
 ## Requirements
 
-- Windows x64 with an OBS Studio 33.0.1 install.
-- The build is pinned to exactly OBS 33.0.1. The plugin links against the FFmpeg that ships with that OBS version (avformat major 62). If OBS later ships a different FFmpeg major, the plugin fails to load in it (OBS logs a failed-to-load-plugin line) until a build for that OBS version exists. This is normal for OBS plugins and needs a rebuild, not a setting.
+- Windows x64 with OBS Studio 33.0 or newer. The plugin is built against OBS 33.0.1; an OBS plugin that reports an older libobs API also loads on future OBS versions, so newer OBS releases need no special build of this plugin. OBS 32 and older will refuse to load it (OBS logs a failed-to-load-plugin line).
+- Nothing else. The zip carries the FFmpeg DLLs the plugin needs inside the plugin folder, so it does not depend on the FFmpeg that ships with your OBS.
 
 ## Install
 
 1. Close OBS.
 2. Download `obs-replay-to-disk-<version>-windows-x64.zip` from the [releases page](https://github.com/John-UNOwen/obs-replay-to-disk/releases). Each release carries one such zip, built by GitHub Actions from a version tag, with SHA-256 checksums listed in the release notes.
-3. Unzip, and copy the `obs-replay-to-disk` folder into `%ProgramData%\obs-studio\plugins\` (create the `plugins` folder if it does not exist). You should end up with `%ProgramData%\obs-studio\plugins\obs-replay-to-disk\bin\64bit\obs-replay-to-disk.dll` and `...\obs-replay-to-disk\data\locale\en-US.ini`.
+3. Unzip, and copy the whole `obs-replay-to-disk` folder into `%ProgramData%\obs-studio\plugins\` (create the `plugins` folder if it does not exist). You should end up with `%ProgramData%\obs-studio\plugins\obs-replay-to-disk\bin\64bit\obs-replay-to-disk.dll`, the FFmpeg DLLs next to it, and `...\obs-replay-to-disk\data\locale\en-US.ini`.
 4. Start OBS. To verify it loaded: Help > Log Files > View Log Files, and look for `[obs-replay-to-disk] plugin loaded successfully (version 0.1.0)` and `[obs-replay-to-disk] avformat 62.12.102`.
 
 To uninstall, remove the `%ProgramData%\obs-studio\plugins\obs-replay-to-disk` folder and restart OBS. Your saved clips and recordings are not touched.
@@ -83,8 +83,8 @@ cmake --build --preset windows-x64 --config RelWithDebInfo
 cmake --install build_x64 --prefix release/RelWithDebInfo --config RelWithDebInfo
 ```
 
-The installed plugin lands in `release/RelWithDebInfo/obs-replay-to-disk/`: the DLL and PDB in `bin/64bit/`, locale files in `data/locale/`.
+The installed plugin lands in `release/RelWithDebInfo/obs-replay-to-disk/`: the DLL and PDB in `bin/64bit/`, together with the FFmpeg DLLs the plugin bundles, locale files in `data/locale/`.
 
 ## License
 
-GPL-2.0-or-later.
+GPL-2.0-or-later. The release zip redistributes the FFmpeg shared libraries from OBS's build dependencies ([obs-deps](https://github.com/obsproject/obs-deps), FFmpeg source at [ffmpeg.org](https://ffmpeg.org)), which are LGPL/GPL-licensed; their sources come from the same two places.

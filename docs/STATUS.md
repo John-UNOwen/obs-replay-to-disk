@@ -1172,3 +1172,86 @@ blocker; they had simply never been run.
 
 That closes the proof list: (a) and (e) were run in the round, (b), (c) and
 (d) above. What remains unit-only or manual is exactly the honesty bullet.
+
+## Widening OBS compatibility: FFmpeg bundled with the plugin (2026-11-14)
+
+Owner ask: support a wider OBS range than exactly 33.0.1. Research split the
+pin into two independent gates:
+
+- The libobs API gate. `OBS_DECLARE_MODULE()` inside libobs's own
+  `obs-module.h` defines `obs_module_ver()` returning `LIBOBS_API_VER` (33.0
+  for our build), and libobs refuses any plugin reporting a version newer
+  than itself. Older-built plugins are accepted, so this gate is
+  forward-open: a 33-built plugin can load on future OBS; OBS ≤ 32 can never
+  load it. Nothing to change here — this is also what the OBS plugin
+  ecosystem documents.
+- The FFmpeg soname gate. Our import table names `avformat-62.dll`,
+  `avcodec-62.dll`, `avutil-60.dll` (dumpbin on the built DLL, matching the
+  FFmpeg 8 pair OBS 33 ships). Per [ffmpeg.org's version tables](https://ffmpeg.org/download.html),
+  OBS 30/31 ship 6.0/6.1 (all 60/60/58), OBS 32 ships 7.1 (61/61/59), OBS 33
+  ships 8.x (62/62/60). A future OBS with a different major is what breaks
+  the import, and that is the gate worth removing.
+
+Owner chose option B: bundle FFmpeg inside the plugin package (one zip works
+on 33 and any later OBS, forward-only; a static-FFmpeg build — option C —
+was left open as future slimming). Two mechanics decided the design, both
+measured, not assumed:
+
+- OBS maps plugins with `os_dlopen`'s `LoadLibraryExW(path, NULL,
+  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`, so
+  the plugin's own folder is searched for its direct imports; and a module
+  OBS already loaded by the same basename wins over ours.
+- Those flags do NOT extend to the bundled DLLs' own child imports. A
+  scratch harness (console exe, same flags, plugin-like DLL importing
+  avformat-62, no FFmpeg anywhere else on the machine) reproduced it: first
+  level resolves from the plugin folder, `avcodec-62` then fails with err
+  126. Preloading the closure dependency-first fixes it. The plugin now
+  delay-loads its three FFmpeg imports (`<DelayLoadDLLs>avformat-62.dll;
+  avcodec-62.dll;avutil-60.dll</DelayLoadDLLs>` in the vcxproj, derived from
+  the `FFmpeg_*_LIBRARY` cache vars) and `rr_ffmpeg_preload()`
+  (`src/plugin/ffmpeg-load.c`, first statement of `obs_module_load`) loads
+  the full closure from the plugin's own directory, topological order,
+  reusing any member OBS already loaded (`GetModuleHandleW` first). A
+  preload failure logs `FFmpeg preload failed: <dll> (err N)` and refuses
+  the load, so a broken install is loud in the OBS log.
+- The closure is 8 files (dumpbin `/DEPENDENTS` transitive walk over
+  obs-deps 2026-10-23): avutil-60, zlib, swresample-6, libx264-164, srt,
+  librist, avcodec-62, avformat-62 — the same binaries OBS 33 ships,
+  ≈ 42.7 MB uncompressed, installed next to the plugin DLL by the bundle
+  list in `CMakeLists.txt`; the list and `ffmpeg-load.c` must stay in sync
+  and the configure fails loudly if a member is missing.
+
+Evidence:
+
+- ctest `ffmpeg_load` (new, 3/3 green): a process that never links FFmpeg
+  preloads all 8 members from the dependency folder, every closure member
+  is a loaded module afterwards in order, and `avformat_version` resolves
+  from the loaded module (62.12.102).
+- Rig run `ff-dl-t3` (`2026-11-14 03-21-49.txt`, save mode, the delay-load
+  build + bundle deployed to the rig's plugin dir): `plugin loaded
+  successfully (version 0.1.0)`, `avformat 62.12.102` straight after
+  (first delay-thunk call through the preload), both saves `warnings=0`
+  at ffprobe durations 20.032000 s and 31.000000 s (bands), `ffmpeg -v
+  warning` silent on both, 0 `rrseg_*`/`*.rrpart` left, `selftest finished:
+  ok`, leaks 1 (baseline). OBS skipped the bundled copies in its module
+  scan (`Skipping module ... not an OBS plugin` — three such lines in
+  earlier runs) and coexisted with its own FFmpeg.
+- Failed experiment, kept for the record: trying to hide OBS's own FFmpeg
+  (rename `bin\64bit\{avformat-62,avcodec-62,avutil-60}.dll`) hung OBS at
+  startup behind a module-failure modal (process up, no window; own PID
+  killed, names restored). The "future OBS" state cannot be simulated by
+  breaking 33 — OBS's own plugins import the same sonames — so the future
+  case rests on the loader mechanics above, proven outside OBS, plus OBS's
+  documented load rule. An OBS ≤ 32 rig would not help either: its libobs
+  version gate refuses this build by design.
+
+Gates on the final tree: windows-x64 RelWithDebInfo 0 warnings, `/W4 /WX`
+exit 0, Release build 0 warnings with ctest 3/3, clang-format 19.1.1 and
+gersemi 0.29.2 clean, CI test-target line includes `test_ffmpeg_load`.
+Tag `0.1.0` was re-pointed to this commit (no CI run had consumed it).
+
+Honest edges: the zip grew ≈ 43 MB (slim custom-configure FFmpeg build stays
+an option); the bundled DLLs sit in a user-writable folder, a DLL-hijack
+surface shared with every ProgramData-installed plugin (a checksum-at-load
+pass is the recorded mitigation if wanted); README carries the FFmpeg
+redistribution note (obs-deps / ffmpeg.org).

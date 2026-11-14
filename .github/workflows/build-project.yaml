@@ -301,7 +301,7 @@ jobs:
             throw 'Configuring the unit tests failed.'
           }
 
-          cmake --build --preset windows-ci-x64 --config $Config --target test_core test_rename --parallel
+          cmake --build --preset windows-ci-x64 --config $Config --target test_core test_rename test_ffmpeg_load --parallel
           if ( $LASTEXITCODE -ne 0 ) {
             throw 'Building the unit tests failed.'
           }

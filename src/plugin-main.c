@@ -41,6 +41,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <sys/stat.h>
 
 #include "plugin/engine.h"
+#include "plugin/ffmpeg-load.h"
 #include "plugin/plugin-ui.h"
 #include "plugin/settings.h"
 
@@ -447,6 +448,14 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 
 bool obs_module_load(void)
 {
+	/* FFmpeg is delay-loaded (see plugin/ffmpeg-load.h): bring the closure
+	 * in from the plugin's own folder before the first FFmpeg call. */
+	char fferr[160] = {0};
+	if (!rr_ffmpeg_preload(fferr, sizeof(fferr))) {
+		obs_log(LOG_ERROR, "FFmpeg preload failed: %s", fferr);
+		return false;
+	}
+
 	const unsigned ver = avformat_version();
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 	obs_log(LOG_INFO, "avformat %u.%u.%u", AV_VERSION_MAJOR(ver), AV_VERSION_MINOR(ver), AV_VERSION_MICRO(ver));
