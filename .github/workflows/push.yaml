@@ -1,5 +1,5 @@
 name: Push
-run-name: ${{ github.ref_name }} push run 🚀
+run-name: ${{ github.ref_name }} push run
 on:
   push:
     branches:
@@ -12,21 +12,21 @@ permissions:
   contents: write
 jobs:
   check-format:
-    name: Check Formatting 🔍
+    name: Check Formatting
     if: github.ref_name == 'master' || github.ref_name == 'main'
     uses: ./.github/workflows/check-format.yaml
     permissions:
       contents: read
 
   build-project:
-    name: Build Project 🧱
+    name: Build Project
     uses: ./.github/workflows/build-project.yaml
     secrets: inherit
     permissions:
       contents: read
 
   create-release:
-    name: Create Release 🛫
+    name: Create Release
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     needs: build-project
@@ -34,7 +34,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Check Release Tag ☑️
+      - name: Check Release Tag
         id: check
         run: |
           : Check Release Tag ☑️
@@ -55,12 +55,12 @@ jobs:
             *) echo 'validTag=false' >> $GITHUB_OUTPUT ;;
           esac
 
-      - name: Download Build Artifacts 📥
+      - name: Download Build Artifacts
         uses: actions/download-artifact@v4
         if: fromJSON(steps.check.outputs.validTag)
         id: download
 
-      - name: Rename Files 🏷️
+      - name: Rename Files
         if: fromJSON(steps.check.outputs.validTag)
         run: |
           : Rename Files 🏷️
@@ -88,7 +88,7 @@ jobs:
             done
           done
 
-      - name: Generate Checksums 🪪
+      - name: Generate Checksums
         if: fromJSON(steps.check.outputs.validTag)
         run: |
           : Generate Checksums 🪪
@@ -100,7 +100,7 @@ jobs:
             echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
           done
 
-      - name: Create Release 🛫
+      - name: Create Release
         if: fromJSON(steps.check.outputs.validTag)
         id: create_release
         uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564
@@ -119,7 +119,7 @@ jobs:
             ${{ github.workspace }}/*.tar.xz
 
   dev-release:
-    name: Update Dev Draft Release 🧪
+    name: Update Dev Draft Release
     if: github.ref_name == 'main'
     runs-on: ubuntu-24.04
     needs: build-project
@@ -127,10 +127,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Download Build Artifacts 📥
+      - name: Download Build Artifacts
         uses: actions/download-artifact@v4
 
-      - name: Prepare Dev Asset 📦
+      - name: Prepare Dev Asset
         run: |
           : Prepare Dev Asset 📦
           set -e
@@ -154,7 +154,7 @@ jobs:
               | awk '{print "    obs-replay-to-disk-dev-windows-x64.zip: " $1}'
           } > "${GITHUB_WORKSPACE}/DEV_RELEASE.md"
 
-      - name: Update Draft Release 🛫
+      - name: Update Draft Release
         uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564
         with:
           tag_name: dev

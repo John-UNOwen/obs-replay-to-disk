@@ -69,7 +69,7 @@ runs:
 
         .github/scripts/package-macos ${package_args}
 
-    - name: Install Dependencies 🛍️
+    - name: Install Dependencies
       if: runner.os == 'Linux'
       shell: bash
       run: |
