@@ -28,6 +28,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSpinBox>
 #include <QTimer>
 #include <QAbstractButton>
@@ -50,7 +51,8 @@ static ReplayToDiskDialog *g_dialog = nullptr;
  * the free-text fields can differ from the saved copy after a clamp. */
 static bool config_equal(const struct rr_config &a, const struct rr_config &b)
 {
-	return a.autostart == b.autostart && a.buffer_seconds == b.buffer_seconds && a.save_scope == b.save_scope &&
+	return a.settings_source == b.settings_source && a.autostart == b.autostart &&
+	       a.buffer_seconds == b.buffer_seconds && a.save_scope == b.save_scope &&
 	       strcmp(a.buffer_dir, b.buffer_dir) == 0 && strcmp(a.output_dir, b.output_dir) == 0 &&
 	       strcmp(a.filename_format, b.filename_format) == 0 && strcmp(a.video_encoder, b.video_encoder) == 0 &&
 	       a.rate_control == b.rate_control && a.bitrate_kbps == b.bitrate_kbps && a.cq_level == b.cq_level &&
@@ -113,6 +115,20 @@ void ReplayToDiskDialog::build_ui()
 	auto *note = new QLabel(rr_qtext("Note.SettingsLocked"), this);
 	note->setWordWrap(true);
 	root->addWidget(note);
+
+	/* settings source (mutually exclusive): with an OBS source chosen, the
+	 * encoder/audio rows below are disabled and the buffer uses OBS's own
+	 * Output settings instead (resolved at every buffer start). */
+	auto *sourceRow = new QHBoxLayout();
+	sourceRow->addWidget(new QLabel(rr_qtext("Label.SettingsSource"), this));
+	m_sourceManual = new QRadioButton(rr_qtext("Source.Manual"), this);
+	m_sourceStreaming = new QRadioButton(rr_qtext("Source.Streaming"), this);
+	m_sourceRecording = new QRadioButton(rr_qtext("Source.Recording"), this);
+	sourceRow->addWidget(m_sourceManual);
+	sourceRow->addWidget(m_sourceStreaming);
+	sourceRow->addWidget(m_sourceRecording);
+	sourceRow->addStretch();
+	root->addLayout(sourceRow);
 
 	auto *form = new QFormLayout();
 
@@ -221,6 +237,10 @@ void ReplayToDiskDialog::build_ui()
 			update_disk_line();
 		});
 	}
+
+	connect(m_sourceManual, &QRadioButton::toggled, this, [this](bool) { update_source_enabled(); });
+	connect(m_sourceStreaming, &QRadioButton::toggled, this, [this](bool) { update_source_enabled(); });
+	connect(m_sourceRecording, &QRadioButton::toggled, this, [this](bool) { update_source_enabled(); });
 }
 
 QHBoxLayout *ReplayToDiskDialog::dir_row(QLineEdit *edit, bool for_buffer)
@@ -308,9 +328,24 @@ int ReplayToDiskDialog::track_mask() const
 
 void ReplayToDiskDialog::update_rc_enabled()
 {
+	const bool manual = m_sourceManual->isChecked();
 	const int rc = m_rateControl->currentData().toInt();
-	m_bitrate->setEnabled(rc == RR_RC_CBR);
-	m_cq->setEnabled(rc == RR_RC_CQP);
+	m_bitrate->setEnabled(manual && rc == RR_RC_CBR);
+	m_cq->setEnabled(manual && rc == RR_RC_CQP);
+}
+
+void ReplayToDiskDialog::update_source_enabled()
+{
+	/* Greyed fields keep showing the last manual values: with an OBS source
+	 * the buffer does not use them, and they return when Manual is selected. */
+	const bool manual = m_sourceManual->isChecked();
+	m_encoder->setEnabled(manual);
+	m_rateControl->setEnabled(manual);
+	m_extra->setEnabled(manual);
+	m_audioBitrate->setEnabled(manual);
+	for (int i = 0; i < 6; i++)
+		m_tracks[i]->setEnabled(manual);
+	update_rc_enabled();
 }
 
 void ReplayToDiskDialog::reload()
@@ -321,6 +356,9 @@ void ReplayToDiskDialog::reload()
 	rr_settings_default(&def);
 	m_filename->setPlaceholderText(QString::fromUtf8(def.filename_format));
 
+	m_sourceManual->setChecked(m_saved.settings_source == RR_SOURCE_MANUAL);
+	m_sourceStreaming->setChecked(m_saved.settings_source == RR_SOURCE_STREAMING);
+	m_sourceRecording->setChecked(m_saved.settings_source == RR_SOURCE_RECORDING);
 	m_autostart->setChecked(m_saved.autostart);
 	set_buffer_seconds(m_saved.buffer_seconds);
 	m_scope->setCurrentIndex(m_scope->findData(m_saved.save_scope));
@@ -347,7 +385,7 @@ void ReplayToDiskDialog::reload()
 	m_bufferDir->setPlaceholderText(QString::fromUtf8(buf));
 	m_outputDir->setPlaceholderText(QString::fromUtf8(out));
 
-	update_rc_enabled();
+	update_source_enabled();
 	update_disk_line();
 	refresh_status();
 }
@@ -355,6 +393,9 @@ void ReplayToDiskDialog::reload()
 void ReplayToDiskDialog::collect(struct rr_config *cfg) const
 {
 	*cfg = m_saved;
+	cfg->settings_source = m_sourceRecording->isChecked()
+				       ? RR_SOURCE_RECORDING
+				       : (m_sourceStreaming->isChecked() ? RR_SOURCE_STREAMING : RR_SOURCE_MANUAL);
 	cfg->autostart = m_autostart->isChecked();
 	cfg->buffer_seconds = m_bufferSeconds;
 	cfg->save_scope = m_scope->currentData().toInt();

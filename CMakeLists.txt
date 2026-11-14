@@ -73,6 +73,7 @@ target_sources(
     src/plugin/plugin-ui.h
     src/plugin/rename.c
     src/plugin/settings.c
+    src/plugin/settings-source.c
 )
 
 # Widen OBS version support (docs/STATUS.md "Widening OBS compatibility"):

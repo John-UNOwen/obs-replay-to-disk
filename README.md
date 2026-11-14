@@ -32,6 +32,7 @@ Everything is set in the dialog. The values are stored in `settings.json` in OBS
 
 | Setting | Default | Notes |
 |---|---|---|
+| Settings source | Manual | or use OBS's streaming / OBS's recording settings instead of the rows below (see after the table) |
 | Autostart | off | start the buffer when OBS finishes loading |
 | Buffer length | 30 min | 30 s to 30 min |
 | Save scope | Full window | or: only footage since the previous save |
@@ -48,6 +49,8 @@ Everything is set in the dialog. The values are stored in `settings.json` in OBS
 | Save sound | on | system beep when a save finishes |
 
 With constant quality, the disk-space estimate in the dialog assumes about 50 Mbps.
+
+Settings source (the radio row at the top of the dialog) is one of Manual, OBS streaming settings, or OBS recording settings. With an OBS source, the video encoder, rate control, bitrate/quality, extra encoder settings, audio tracks and audio bitrate come from OBS's own Output settings, re-read every time the buffer starts, and those dialog rows gray out; everything else always comes from the plugin. Mapping: OBS's bitrate-based rate controls (CBR, VBR, QVBR, …) become CBR at OBS's bitrate, CRF/CQP/ICQ become constant quality at OBS's level; simple-mode recording qualities Small/HQ become quality level 23/16; recording set to "same as stream" follows the streaming settings; Lossless recording is not supported (a warning is logged and the encoder is picked automatically). OBS's simple-mode x264 options box holds a raw options string, not JSON, so it is not inherited. Changing OBS's output settings while the buffer runs takes effect at the next buffer start.
 
 ## Side effects
 

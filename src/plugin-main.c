@@ -44,6 +44,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "plugin/ffmpeg-load.h"
 #include "plugin/plugin-ui.h"
 #include "plugin/settings.h"
+#include "plugin/settings-source.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -186,6 +187,10 @@ static void start_from_settings(void)
 		g_start_cfg = cfg; /* full snapshot: a profile switch restarts with the same settings and folders */
 		g_start_cfg_valid = true;
 	}
+	/* The OBS settings sources are re-read at every start, so a change in
+	 * OBS's Output dialog applies at the next buffer start (the snapshot
+	 * above keeps folders and the rest stable across a profile switch). */
+	rr_settings_resolve_source(&cfg);
 	rr_engine_start(&cfg);
 }
 
@@ -349,6 +354,20 @@ static void selftest_start(void)
 	if (enc && *enc)
 		snprintf(cfg.video_encoder, sizeof(cfg.video_encoder), "%s", enc);
 
+	/* RR_SELFTEST_SOURCE: arm a settings source (manual/streaming/recording).
+	 * Resolution runs at the very end (UI thread), so it overrides the
+	 * encoder/bitrate/tracks keys above exactly like it does in production. */
+	const char *source = getenv("RR_SELFTEST_SOURCE");
+	if (source && *source) {
+		if (strcmp(source, "streaming") == 0)
+			cfg.settings_source = RR_SOURCE_STREAMING;
+		else if (strcmp(source, "recording") == 0)
+			cfg.settings_source = RR_SOURCE_RECORDING;
+		else
+			cfg.settings_source = RR_SOURCE_MANUAL;
+		obs_log(LOG_INFO, "selftest: settings source override: %s", source);
+	}
+
 	/* RR_SELFTEST_FILENAME: selftest-only filename_format override. Without
 	 * it the selftest always uses the default timestamp format, whose name a
 	 * harness cannot pre-create, so the suffix-chain proof (a known stem the
@@ -385,6 +404,8 @@ static void selftest_start(void)
 		obs_log(LOG_INFO, "selftest: buffer mode window=%ds run=%ds dir=%s media=%s", window, run_sec, dir,
 			media ? media : "(none)");
 	}
+
+	rr_settings_resolve_source(&cfg); /* after every override: the source wins, like in production */
 
 	g_start_cfg = cfg;
 	g_start_cfg_valid = true; /* a profile switch restarts into the self-test folders */
@@ -574,6 +595,7 @@ void rr_plugin_start(void)
 	rr_plugin_effective_dirs(&cfg, buf, sizeof(buf), out, sizeof(out));
 	snprintf(cfg.buffer_dir, sizeof(cfg.buffer_dir), "%s", buf);
 	snprintf(cfg.output_dir, sizeof(cfg.output_dir), "%s", out);
+	rr_settings_resolve_source(&cfg); /* OBS settings sources are read per start */
 	rr_engine_start(&cfg);
 }
 

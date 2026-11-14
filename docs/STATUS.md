@@ -1319,3 +1319,67 @@ README-era zip): with OBS closed, move everything from
 next to `data\` — the flat set is what the new layout wants, and our bundled
 FFmpeg dependencies move with the DLL, so the "complex dependencies"
 exception on the OBS page does not apply.
+
+## Settings source: buffer follows OBS streaming/recording settings (2026-11-14)
+
+Feature request: instead of filling the plugin dialog, let the buffer reuse the
+encoder settings OBS already has, streaming or recording, mutually exclusive.
+Dialog gains a radio row (Manual default / streaming / recording); with an OBS
+source the inherited rows gray out and every buffer start re-reads OBS's
+Output settings (owner choice: apply at buffer restart, not live).
+
+What is inherited (owner picked: video + audio, not paths): video encoder id,
+rate control, bitrate/quality, extra encoder JSON, audio track mask, audio
+bitrate. What always stays plugin-side: folders, window, scope, filename,
+sounds, autostart.
+
+Reads mirror OBS 33 sources, checked against 33.0.1, not memory:
+- output mode: profile `Output/Mode` = "Simple"/"Advanced" (NOT a
+  `General/OutputMode` key - first draft used that and the source shows
+  OBSBasicSettings.cpp reads "Output"/"Mode").
+- simple mode: `SimpleOutput` StreamEncoder/RecEncoder are symbolic ("x264",
+  "nvenc", "qsv", "amd", codec-suffixed variants) and map through a copy of
+  OBS's get_simple_output_encoder(); VBitrate/ABitrate; RecQuality
+  Stream/Lossless/Small/HQ (HQ≈CRF16, Small≈CRF23 per
+  SimpleOutput::UpdateRecordingSettings, CalcCRF's resolution tweak is not
+  replicated); recording mask `SimpleOutput/RecTracks`.
+- advanced mode: `AdvOut` Encoder/RecEncoder hold real ids (RecEncoder "none"
+  means the recording reuses the stream encoder → we follow the streaming
+  settings, matching AdvancedOutput.cpp's useStreamEncoder); RC/bitrate/quality
+  come from the profile's streamEncoder.json / recordEncoder.json
+  (AdvancedOutput.cpp GetDataFromJsonFile, resolved via
+  obs_frontend_get_current_profile_path()); extra JSON = that data's "settings"
+  string; masks from AdvOut RecTracks / StreamMultiTrackAudioMixes /
+  TrackIndex; per-track bitrates AdvOut Track<N>Bitrate.
+- RC mapping: bitrate-based (CBR, VBR, QVBR, LA_CBR, NVENC Quality/Latency…)
+  → CBR at OBS's bitrate (D14 keeps VBR out); CRF/CQP/ICQ/LDCQ → CQP at
+  OBS's level. Lossless recording → warning + automatic encoder (utvideo/AVI
+  cannot be mirrored). Simple mode's x264Settings is a raw options string,
+  not JSON → not inherited.
+
+New module src/plugin/settings-source.c (UI thread, obs_frontend_*);
+rr_settings_resolve_source runs in every start path (rr_plugin_start,
+start_from_settings, selftest) after the folder resolve, before rr_engine_start;
+engine untouched. settings.json gains "settings_source". Selftest hook:
+RR_SELFTEST_SOURCE.
+
+Rig proof, four runs (src-t1..t4, 2026-11-14): each arm = profile ini/json +
+RR_SELFTEST_SOURCE, save at t=20. Observed (log "settings source:" line plus
+the encoder's own settings line):
+- simple/streaming → "encoder obs_x264, CBR 13000 kbps, audio 0x01 at 128";
+  saved MP4 29.6 MB/19.00 s ≈ 12.4 Mbps video: the bitrate is physically in
+  the file, warnings=0.
+- simple/recording HQ, RecTracks=3 → CQP quality 16; x264 log "rate_control:
+  CRF, crf: 16"; two AAC encoders at 96 kbps on tracks 1+2 (the env
+  TRACKS=1 was overridden by inheritance, as designed).
+- advanced/streaming with streamEncoder.json {CBR,43000,settings preset slow}
+  → CBR 43000, x264 log "preset: slow" (extra-JSON inheritance proven), audio
+  112 from Track1Bitrate.
+- advanced/recording {CQP,28}, RecTracks=5 → CQP 28 (crf: 28), mask 0x05 →
+  AAC on tracks 1+3 at 144.
+All four: save finished warnings=0, selftest ok, clean exit.
+
+Gates green at this commit (both configs build clean /W4-cl, ctest 3/3).
+Edge kept from the design: g_start_cfg snapshots unresolved values; every
+start resolves fresh, so a profile switch autostart reads the new profile's
+output settings.

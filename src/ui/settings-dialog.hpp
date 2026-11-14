@@ -15,6 +15,7 @@ class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QRadioButton;
 class QSpinBox;
 class QTimer;
 
@@ -36,6 +37,7 @@ private:
 	int track_mask() const;
 	void on_length_changed();
 	void update_rc_enabled();
+	void update_source_enabled();
 	void collect(struct rr_config *cfg) const;
 	void update_disk_line();
 	bool apply();
@@ -49,6 +51,9 @@ private:
 	QLabel *m_errorLine = nullptr;
 	QLabel *m_diskLine = nullptr;
 
+	QRadioButton *m_sourceManual = nullptr;
+	QRadioButton *m_sourceStreaming = nullptr;
+	QRadioButton *m_sourceRecording = nullptr;
 	QCheckBox *m_autostart = nullptr;
 	QSpinBox *m_minutes = nullptr;
 	QSpinBox *m_seconds = nullptr;

@@ -25,6 +25,7 @@
 void rr_settings_default(struct rr_config *cfg)
 {
 	memset(cfg, 0, sizeof(*cfg));
+	cfg->settings_source = RR_SOURCE_MANUAL;
 	cfg->autostart = false;
 	cfg->buffer_seconds = 1800;
 	cfg->save_scope = RR_SCOPE_WINDOW;
@@ -52,6 +53,8 @@ static int clamp_int(int v, int lo, int hi)
 
 void rr_settings_clamp(struct rr_config *cfg)
 {
+	if (cfg->settings_source != RR_SOURCE_STREAMING && cfg->settings_source != RR_SOURCE_RECORDING)
+		cfg->settings_source = RR_SOURCE_MANUAL;
 	cfg->buffer_seconds = rr_settings_clamp_window_sec(cfg->buffer_seconds);
 	if (cfg->save_scope != RR_SCOPE_WINDOW && cfg->save_scope != RR_SCOPE_SINCE_LAST_SAVE)
 		cfg->save_scope = RR_SCOPE_WINDOW;
@@ -124,6 +127,13 @@ void rr_settings_load(struct rr_config *cfg)
 	if (!data)
 		return; /* missing or unreadable: the defaults stay in place */
 
+	const char *source = obs_data_get_string(data, "settings_source");
+	if (strcmp(source, "streaming") == 0)
+		cfg->settings_source = RR_SOURCE_STREAMING;
+	else if (strcmp(source, "recording") == 0)
+		cfg->settings_source = RR_SOURCE_RECORDING;
+	else
+		cfg->settings_source = RR_SOURCE_MANUAL;
 	cfg->autostart = obs_data_get_bool(data, "autostart");
 	cfg->buffer_seconds = (int)obs_data_get_int(data, "buffer_seconds");
 	if (strcmp(obs_data_get_string(data, "save_scope"), "since_last_save") == 0)
@@ -171,6 +181,10 @@ bool rr_settings_save(const struct rr_config *cfg)
 		return false;
 
 	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "settings_source",
+			    copy.settings_source == RR_SOURCE_STREAMING
+				    ? "streaming"
+				    : (copy.settings_source == RR_SOURCE_RECORDING ? "recording" : "manual"));
 	obs_data_set_bool(data, "autostart", copy.autostart);
 	obs_data_set_int(data, "buffer_seconds", copy.buffer_seconds);
 	obs_data_set_string(data, "save_scope",

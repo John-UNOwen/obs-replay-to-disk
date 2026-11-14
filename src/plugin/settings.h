@@ -23,10 +23,19 @@ extern "C" {
 enum rr_save_scope { RR_SCOPE_WINDOW = 0, RR_SCOPE_SINCE_LAST_SAVE = 1 };
 enum rr_rate_control { RR_RC_CBR = 0, RR_RC_CQP = 1 };
 
+/* Which settings drive the buffer (mutually exclusive). Manual is every
+ * value below as configured; the OBS sources replace the video encoder, rate
+ * control, bitrate/quality, extra JSON, audio tracks and audio bitrate with
+ * what OBS's own Output settings say (resolved per buffer start, see
+ * plugin/settings-source.h). Folders, buffer length, scope, filename and
+ * sounds always come from the plugin. */
+enum rr_settings_source { RR_SOURCE_MANUAL = 0, RR_SOURCE_STREAMING = 1, RR_SOURCE_RECORDING = 2 };
+
 /* Everything in handoff 5.8. buffer_dir/output_dir are the raw configured
  * strings: empty means "resolve from the OBS recording path", and only the UI
  * thread may resolve them (the worker never calls obs_frontend_*). */
 struct rr_config {
+	int settings_source; /* enum rr_settings_source (default manual) */
 	bool autostart;
 	int buffer_seconds;          /* 30–1800 (clamped) */
 	int save_scope;              /* enum rr_save_scope */
