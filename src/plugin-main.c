@@ -21,7 +21,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * dialog/dock (plugin-ui.h), the global proc and saved signal (8.5), and the
  * self-test hook (D18, handoff 7.2, modes `buffer` and `save`).
  * All UI-thread work (obs_frontend_*, folder resolution) happens here before
- * rr_engine_start; the worker never calls obs_frontend_*.
+ * rr_engine_start; the worker never calls obs_frontend_*. The self-test
+ * watchdog thread likewise never touches libobs objects or the watcher: it
+ * hands those operations to OBS_TASK_UI tasks and waits on events.
  */
 
 #include <obs-module.h>
@@ -329,11 +331,25 @@ static int selftest_parse_saves(const char *list)
  *        autostart + follow retarget expected
  *  12 s  check the buffer started; check the pinned capture source now
  *        points at the foreground app
+ *  13 s  delete the follow source (release its last ref; the watcher pin is
+ *        weak): the watcher must warn — throttled, not once and then silence
+ *        forever — and keep retrying while the app is still foreground
  *  15 s  spawn the hidden app (a second listed app that never gets focus)  ->
  *        must NOT move the source and must NOT touch the running buffer
- *  21 s  check both held, then terminate the foreground app (a real process
- *        exit: the watcher must never stop the buffer)
- *  30 s  check the buffer is still running; cleanup + stop + finish
+ *  16 s  re-add the source (re-created, answers the uuid the settings point
+ *        at) -> the retry path must re-follow on its own, within a tick
+ *  19 s  check the source points at the foreground app again (follow-retry)
+ *  21 s  check hidden app stayed out and buffer still running, then terminate
+ *        the foreground app (a real process exit: the watcher must never stop
+ *        the buffer)
+ *  28 s  check the buffer is still running
+ *
+ * Cleanup has no scheduled tick: the loop then runs until RR_SELFTEST_RUN
+ * seconds (default 120), and only at loop exit does the worker terminate the
+ * test apps and close their process handles, restore the live settings the run
+ * injected (end-of-run
+ * watch_ui_task, then rr_process_watch_refresh — the watcher must go back to
+ * inert), release the pinned source, stop the engine and log the summary.
  *
  * The two spawned apps are configurable (RR_SELFTEST_WATCH_APP for the
  * foreground app, RR_SELFTEST_WATCH_HIDDEN for the windowless one) so the rig
@@ -345,10 +361,18 @@ struct watch_procs {
 	obs_source_t *src;          /* own ref, pinned into the watcher */
 	bool ok_autostart;
 	bool ok_follow;
+	bool ok_follow_retry; /* re-followed on its own after delete + re-add */
 	bool ok_background;
 	bool ok_kept_running;
 };
 static struct watch_procs g_st_watch;
+
+/* Live-settings snapshot taken in selftest_start right before watch mode
+ * injects its test config into g_settings (g_settings = cfg). The run's last
+ * UI task restores it; until then the watcher runs on the test values by
+ * design. */
+static struct rr_config g_settings_saved;
+static bool g_settings_saved_valid;
 
 static const char *env_or(const char *name, const char *def)
 {
@@ -371,39 +395,192 @@ static void base_lower(char *dst, size_t n, const char *path)
 	lower_copy(dst, n, slash ? slash + 1 : path);
 }
 
+/* The selftest never waits on or inspects the children's threads, so their
+ * thread handles are dropped right where they are acquired; only hProcess
+ * stays open, closed by the worker at loop exit after its final
+ * TerminateProcess. Keeping them open would leak one kernel handle per child
+ * for the whole OBS session. */
+static void close_child_thread(PROCESS_INFORMATION *pi)
+{
+	if (pi->hThread) {
+		CloseHandle(pi->hThread);
+		pi->hThread = NULL;
+	}
+}
+
 static void spawn_hidden(const wchar_t *exe, const wchar_t *args, PROCESS_INFORMATION *pi)
 {
 	STARTUPINFOW si = {sizeof(si)};
+	ZeroMemory(pi, sizeof(*pi));
 	wchar_t line[512];
-	swprintf(line, sizeof(line) / sizeof(line[0]), L"%s %s", exe, args);
-	if (CreateProcessW(exe, line, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, pi))
+	/* Quote the exe path: lpApplicationName makes CreateProcessW find the right exe,
+	 * but the child builds its own argv from this command line, so an unquoted path
+	 * with spaces would cut its argv[0] at the first space. */
+	if (args && *args)
+		swprintf(line, sizeof(line) / sizeof(line[0]), L"\"%s\" %s", exe, args);
+	else
+		swprintf(line, sizeof(line) / sizeof(line[0]), L"\"%s\"", exe);
+	if (CreateProcessW(exe, line, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, pi)) {
+		close_child_thread(pi);
 		return;
+	}
+	/* A failed CreateProcessW leaves the struct undefined; zero it so the run-end
+	 * NULL guards below can never act on a garbage handle value. */
+	ZeroMemory(pi, sizeof(*pi));
 	obs_log(LOG_WARNING, "selftest: spawn failed (err %lu)", GetLastError());
 }
 
 static void spawn_foreground(const wchar_t *exe, PROCESS_INFORMATION *pi)
 {
 	STARTUPINFOW si = {sizeof(si)};
-	if (CreateProcessW(exe, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, pi))
+	ZeroMemory(pi, sizeof(*pi));
+	if (CreateProcessW(exe, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, pi)) {
+		close_child_thread(pi);
 		return;
+	}
+	ZeroMemory(pi, sizeof(*pi)); /* same: never leave an undefined handle behind */
 	obs_log(LOG_WARNING, "selftest: spawn failed (err %lu)", GetLastError());
 }
 
-static const char *watch_src_window_setting(obs_source_t *src)
+/* ------------------------------------------------------ watchdog ↔ UI handoff
+ *
+ * The watchdog thread must not call libobs or touch the watcher: both are
+ * UI-thread state. The two source operations the schedule needs — reading
+ * the pinned source's "window" setting and the final unpin + release — run as
+ * obs_queue_task(OBS_TASK_UI, ...) tasks (OBSApp's ui_task_handler queues
+ * them onto the Qt event loop, frontend/OBSApp.cpp), which is exactly where
+ * the 2 s QTimer already mutates the same source (obs-data.c has no lock, so
+ * a settings read here would race obs_source_update; a second thread in
+ * rr_process_watch_pin_source could double-release the weak cache — its
+ * release-then-null is not atomic). Each task ends with SetEvent and the
+ * worker waits on that event bounded. If OBS is closing meanwhile the Qt
+ * loop stops taking work, so the worker skips the task on g_st_stop and the
+ * UI-thread handlers below release the source instead — SCRIPTING_SHUTDOWN
+ * fires inside Shutdown() right before ClearSceneData, whose orphan check
+ * enumerates every still-refcounted source (frontend/widgets/OBSBasic.cpp,
+ * OBSBasic_SceneCollections.cpp). Exactly one task is in flight; the
+ * schedule is strictly sequential. */
+#define RR_WATCH_REQ_WINDOW 1 /* copy the source's window setting into g_watch_window */
+#define RR_WATCH_REQ_RELEASE 2 /* restore the live settings, then unpin + release the pinned test source */
+#define RR_WATCH_REQ_KILL 3   /* release the test source's strong ref, keeping the watcher pin */
+#define RR_WATCH_REQ_READD 4  /* re-create the test source and pin it back under the uuid */
+/* Manual reset, created at selftest_start and never closed: a task the worker
+ * abandoned can still SetEvent, and closing a handle a queued task holds
+ * risks hitting a recycled one; process teardown reclaims it. */
+static HANDLE g_watch_evt;
+static volatile LONG g_watch_req;
+static char g_watch_window[2048]; /* UI task writes, worker reads only after the event */
+
+/* Release the pinned test source's strong ref and the watcher pin. UI thread
+ * only and idempotent (NULL-guarded): the queued task, the frontend-event
+ * handlers below and obs_module_unload all call it; whoever gets there first
+ * wins, the later calls are no-ops. */
+static void release_watch_src_ui(void)
 {
-	static char buf[2048];
-	obs_data_t *s = obs_source_get_settings(src);
-	const char *window = obs_data_get_string(s, "window");
-	snprintf(buf, sizeof(buf), "%s", window ? window : "");
-	obs_data_release(s);
-	return buf;
+	rr_process_watch_pin_source(NULL, NULL);
+	if (g_st_watch.src) {
+		obs_source_release(g_st_watch.src);
+		g_st_watch.src = NULL;
+	}
+}
+
+/* Undo the watch selftest's injection into the live settings (g_settings = cfg
+ * in selftest_start): restore the whole pre-test snapshot, so nothing of the
+ * test config outlives the run — not only the two toggles but the watch list,
+ * the uuid of the released test source and the selftest folders too. Without
+ * this the 2 s watcher keeps ticking on the test config until OBS exits: a
+ * foreground switch to a listed app warns that the follow source (the released
+ * test source) is gone, starting a listed exe autostarts a buffer writing into
+ * the selftest directories, and the dialog shows test values. Idempotent via
+ * the saved flag. UI thread only, like g_settings itself. */
+static void restore_watch_settings_ui(void)
+{
+	if (!g_settings_saved_valid)
+		return;
+	g_settings = g_settings_saved;
+	g_settings_saved_valid = false;
+	obs_log(LOG_INFO, "selftest: watch live settings restored");
+	rr_process_watch_refresh(); /* re-reads the restored (inert) settings: follow state, cache and baseline */
+}
+
+static void watch_ui_task(void *param) /* runs on the UI thread */
+{
+	UNUSED_PARAMETER(param);
+	switch (InterlockedCompareExchange(&g_watch_req, 0, 0)) {
+	case RR_WATCH_REQ_RELEASE:
+		/* Restore first: from here the watcher reads the live settings again and
+		 * cannot warn about, or start anything for, the dying test state; then
+		 * release the test objects. Both are idempotent, and this is the run-end
+		 * task every schedule path (including the break-out early exits) queues. */
+		restore_watch_settings_ui();
+		release_watch_src_ui();
+		break;
+	case RR_WATCH_REQ_KILL:
+		/* Emulate the user deleting the followed source while a listed
+		 * app is foreground: the test's strong ref is the last one (the
+		 * watcher holds only a weak pin), so the source really goes
+		 * away. The watcher must warn repeatedly-but-throttled, keep
+		 * retrying, and re-follow on its own once one answers again. */
+		if (g_st_watch.src) {
+			obs_source_release(g_st_watch.src);
+			g_st_watch.src = NULL;
+		}
+		break;
+	case RR_WATCH_REQ_READD:
+		/* "Deleted, then re-added": a new source answers the uuid the
+		 * settings point at (the pin keys the watcher's cache by that
+		 * uuid), so the retry path re-follows on the next tick. */
+		if (!g_st_watch.src && g_settings.watch_source_id[0]) {
+			g_st_watch.src = obs_source_create("window_capture", "rr_watch_selftest_re", NULL, NULL);
+			if (g_st_watch.src)
+				rr_process_watch_pin_source(g_st_watch.src, g_settings.watch_source_id);
+			else
+				obs_log(LOG_WARNING, "selftest: watch follow-retry: could not re-create the source");
+		}
+		break;
+	default: /* RR_WATCH_REQ_WINDOW */
+		g_watch_window[0] = 0;
+		if (g_st_watch.src) {
+			obs_data_t *s = obs_source_get_settings(g_st_watch.src);
+			const char *window = obs_data_get_string(s, "window");
+			snprintf(g_watch_window, sizeof(g_watch_window), "%s", window ? window : "");
+			obs_data_release(s);
+		}
+		break;
+	}
+	SetEvent(g_watch_evt);
+}
+
+/* Queue one task on the UI thread and wait for it bounded. False means the
+ * worker must not read the result: OBS is closing (the UI handlers do the
+ * release), or the UI never answered and the task may still run later — the
+ * tasks are idempotent and NULL-guarded, so a later pass is harmless. */
+static bool watch_run_ui_task(long req, DWORD timeout_ms)
+{
+	if (g_st_stop || !g_watch_evt)
+		return false;
+	ResetEvent(g_watch_evt);
+	InterlockedExchange(&g_watch_req, req);
+	obs_queue_task(OBS_TASK_UI, watch_ui_task, NULL, false);
+
+	/* Bounded wait, polled: when OBS closes the Qt loop stops serving the
+	 * task, and g_st_stop lets the watchdog leave now — the UI-thread
+	 * handlers already did (or will do) the release. The abandoned task may
+	 * still run later: it only touches UI-thread state idempotently. */
+	const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+	for (;;) {
+		if (WaitForSingleObject(g_watch_evt, 100) == WAIT_OBJECT_0)
+			return true;
+		if (g_st_stop || GetTickCount64() >= deadline)
+			return false;
+	}
 }
 
 static DWORD WINAPI selftest_watch_worker(LPVOID arg)
 {
 	const uint64_t start = os_gettime_ns();
 	const double until = (double)(uintptr_t)arg;
-	bool done[5] = {false, false, false, false, false};
+	bool done[8] = {false, false, false, false, false, false, false, false};
 
 	const char *app_path = env_or("RR_SELFTEST_WATCH_APP", "C:\\Windows\\System32\\notepad.exe");
 	const char *hid_path = env_or("RR_SELFTEST_WATCH_HIDDEN", "C:\\Windows\\System32\\cmd.exe");
@@ -432,21 +609,64 @@ static DWORD WINAPI selftest_watch_worker(LPVOID arg)
 			obs_log(LOG_INFO, "selftest: watch check autostart %s (state=%d)",
 				g_st_watch.ok_autostart ? "ok" : "FAIL", st.state);
 
-			char lower[2048];
-			lower_copy(lower, sizeof(lower), watch_src_window_setting(g_st_watch.src));
+			char lower[2048] = "";
+			if (!watch_run_ui_task(RR_WATCH_REQ_WINDOW, 5000)) {
+				obs_log(LOG_WARNING, "selftest: watch check follow: the UI thread did not answer");
+				break; /* the run is over: OBS is closing or the UI is stuck */
+			}
+			lower_copy(lower, sizeof(lower), g_watch_window);
 			g_st_watch.ok_follow = strstr(lower, want_app) != NULL;
 			obs_log(LOG_INFO, "selftest: watch check follow %s (window='%s')",
 				g_st_watch.ok_follow ? "ok" : "FAIL", lower);
 		}
-		if (!done[2] && t >= 15.0) {
+		if (!done[2] && t >= 13.0) {
 			done[2] = true;
-			spawn_hidden(hid_w, L"/c ping -n 40 127.0.0.1", &g_st_watch.hidden);
+			if (!watch_run_ui_task(RR_WATCH_REQ_KILL, 5000)) {
+				obs_log(LOG_WARNING, "selftest: watch follow-retry: the UI thread did not answer");
+				break;
+			}
+			obs_log(LOG_INFO, "selftest: watch follow source deleted while the listed app is foreground");
+		}
+		if (!done[3] && t >= 15.0) {
+			done[3] = true;
+			/* the keepalive ping is cmd.exe's own syntax and only applies to the
+			 * fallback; a configured scratch app stays alive on its own and must not
+			 * be handed cmd's arguments */
+			const wchar_t *hid_args = strcmp(want_hid, "cmd.exe") == 0 ? L"/c ping -n 40 127.0.0.1" : L"";
+			spawn_hidden(hid_w, hid_args, &g_st_watch.hidden);
 			obs_log(LOG_INFO, "selftest: %s spawned hidden (background listed app)", want_hid);
 		}
-		if (!done[3] && t >= 21.0) {
-			done[3] = true;
-			char lower[2048];
-			lower_copy(lower, sizeof(lower), watch_src_window_setting(g_st_watch.src));
+		if (!done[4] && t >= 16.0) {
+			done[4] = true;
+			if (!watch_run_ui_task(RR_WATCH_REQ_READD, 5000)) {
+				obs_log(LOG_WARNING, "selftest: watch follow-retry: the UI thread did not answer");
+				break;
+			}
+			obs_log(LOG_INFO, "selftest: watch follow source re-added (same uuid) while still foreground");
+		}
+		if (!done[5] && t >= 19.0) {
+			done[5] = true;
+			char lower[2048] = "";
+			if (!watch_run_ui_task(RR_WATCH_REQ_WINDOW, 5000)) {
+				obs_log(LOG_WARNING,
+					"selftest: watch check follow-retry: the UI thread did not answer");
+				break;
+			}
+			lower_copy(lower, sizeof(lower), g_watch_window);
+			g_st_watch.ok_follow_retry = strstr(lower, want_app) != NULL;
+			obs_log(LOG_INFO, "selftest: watch check follow-retry %s (window='%s')",
+				g_st_watch.ok_follow_retry ? "ok" : "FAIL", lower);
+		}
+		if (!done[6] && t >= 21.0) {
+			done[6] = true;
+			char lower[2048] = "";
+			if (!watch_run_ui_task(RR_WATCH_REQ_WINDOW, 5000)) {
+				obs_log(LOG_WARNING,
+					"selftest: watch check background-app-stays-away: the UI thread did not "
+					"answer");
+				break;
+			}
+			lower_copy(lower, sizeof(lower), g_watch_window);
 			struct rr_status st;
 			rr_engine_get_status(&st);
 			g_st_watch.ok_background = strstr(lower, want_app) != NULL && strstr(lower, want_hid) == NULL &&
@@ -460,8 +680,8 @@ static DWORD WINAPI selftest_watch_worker(LPVOID arg)
 				obs_log(LOG_INFO, "selftest: %s terminated (process exit)", want_app);
 			}
 		}
-		if (!done[4] && t >= 28.0) {
-			done[4] = true;
+		if (!done[7] && t >= 28.0) {
+			done[7] = true;
 			struct rr_status st;
 			rr_engine_get_status(&st);
 			g_st_watch.ok_kept_running = st.state != RR_STATE_OFF;
@@ -471,28 +691,40 @@ static DWORD WINAPI selftest_watch_worker(LPVOID arg)
 		os_sleep_ms(100);
 	}
 
-	const bool ok = g_st_watch.ok_autostart && g_st_watch.ok_follow && g_st_watch.ok_background &&
-			g_st_watch.ok_kept_running;
+	const bool ok = g_st_watch.ok_autostart && g_st_watch.ok_follow && g_st_watch.ok_follow_retry &&
+			g_st_watch.ok_background && g_st_watch.ok_kept_running;
 	obs_log(LOG_INFO,
-		"selftest: watch summary autostart=%d follow=%d background-away=%d kept-running-after-exit=%d",
-		g_st_watch.ok_autostart, g_st_watch.ok_follow, g_st_watch.ok_background, g_st_watch.ok_kept_running);
+		"selftest: watch summary autostart=%d follow=%d follow-retry=%d background-away=%d "
+		"kept-running-after-exit=%d",
+		g_st_watch.ok_autostart, g_st_watch.ok_follow, g_st_watch.ok_follow_retry, g_st_watch.ok_background,
+		g_st_watch.ok_kept_running);
 
-	if (g_st_watch.hidden.hProcess)
+	/* Last use of the children's process handles: terminate, then close them
+	 * (their thread handles were closed at spawn). NULL after closing so a
+	 * repeated pass can never double-close. */
+	if (g_st_watch.hidden.hProcess) {
 		TerminateProcess(g_st_watch.hidden.hProcess, 0);
-	if (g_st_watch.app.hProcess)
-		TerminateProcess(g_st_watch.app.hProcess, 0);
-
-	rr_process_watch_pin_source(NULL, NULL);
-	if (g_st_watch.src) {
-		obs_source_release(g_st_watch.src);
-		g_st_watch.src = NULL;
+		CloseHandle(g_st_watch.hidden.hProcess);
+		g_st_watch.hidden.hProcess = NULL;
 	}
+	if (g_st_watch.app.hProcess) {
+		TerminateProcess(g_st_watch.app.hProcess, 0);
+		CloseHandle(g_st_watch.app.hProcess);
+		g_st_watch.app.hProcess = NULL;
+	}
+
+	/* The unpin + release belongs on the UI thread (watch_ui_task): a live
+	 * timer tick may be inside obs_source_update on this source, and the
+	 * watcher's weak-ref cache is UI-thread state. If OBS is closing, the
+	 * handler in on_frontend_event does it (or has) instead. */
+	if (!watch_run_ui_task(RR_WATCH_REQ_RELEASE, 8000))
+		obs_log(LOG_WARNING, "selftest: watch release task not confirmed (OBS exiting?)");
 
 	rr_engine_stop();
 	rr_engine_wait_off(15000);
 	obs_log(LOG_INFO,
-		"selftest finished: %s watch mode (foreground app start+follow, background app ignored, "
-		"start-only honored)",
+		"selftest finished: %s watch mode (foreground app start+follow, delete/re-add re-follows, "
+		"background app ignored, start-only honored)",
 		ok ? "ok" : "failed");
 	return 0;
 }
@@ -550,16 +782,34 @@ static void selftest_start(void)
 		snprintf(cfg.watch_source_name, sizeof(cfg.watch_source_name), "rr_watch_selftest");
 		rr_process_watch_pin_source(g_st_watch.src, uuid);
 
+		g_settings_saved = g_settings; /* the run-end RELEASE task (watch_ui_task) restores it */
+		g_settings_saved_valid = true;
 		g_settings = cfg; /* the watcher and rr_plugin_start read these */
 
 		selftest_attach_media(media);
 		obs_log(LOG_INFO, "selftest: watch mode window=%ds run=%ds names=%s dir=%s", window, run_sec,
 			cfg.watch_names, dir);
 
+		/* The UI handoff event exists before the watchdog starts; it is
+		 * never closed — a task the worker abandoned can still SetEvent
+		 * later, and process teardown reclaims the handle. */
+		if (!g_watch_evt)
+			g_watch_evt = CreateEventW(NULL, TRUE, FALSE, NULL); /* watch_ui_task signals it */
+		if (!g_watch_evt) {
+			obs_log(LOG_INFO, "selftest finished: failed could not create the UI handoff event");
+			release_watch_src_ui(); /* UI thread here, and no watchdog runs */
+			restore_watch_settings_ui();
+			return;
+		}
+
 		g_st_thread =
 			CreateThread(NULL, 0, selftest_watch_worker, (LPVOID)(uintptr_t)(unsigned)run_sec, 0, NULL);
-		if (!g_st_thread)
+		if (!g_st_thread) {
 			obs_log(LOG_INFO, "selftest finished: failed could not create the watchdog thread");
+			/* No watchdog to run the end-of-run task: undo the injection here. */
+			release_watch_src_ui();
+			restore_watch_settings_ui();
+		}
 #else
 		obs_log(LOG_INFO, "selftest finished: failed watch mode needs the UI build");
 #endif
@@ -673,7 +923,22 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 		}
 		break;
 
+	case OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
+		/* Drop every selftest-owned strong ref before OBS tears the
+		 * scene data down: SCRIPTING_SHUTDOWN fires in Shutdown()
+		 * right before ClearSceneData, whose orphan check flags every
+		 * still-refcounted source (OBSBasic.cpp), and CHANGING/CLEANUP
+		 * cover a collection switch mid-run. Both releases are
+		 * idempotent NULL-guards, so no-op outside a selftest run. */
+		release_watch_src_ui();
+		selftest_detach_media();
+		break;
+
 	case OBS_FRONTEND_EVENT_EXIT:
+		release_watch_src_ui();
+		selftest_detach_media();
 		InterlockedExchange(&g_st_stop, 1);
 		rr_engine_shutdown();
 		break;
@@ -736,6 +1001,10 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+	/* UI thread, Qt loop gone: no OBS_TASK_UI runs after this point. The
+	 * watchdog never touches libobs or the watcher, so dropping the
+	 * watcher here (its cache is UI-thread state) while it may still be
+	 * finishing is safe. */
 #ifdef RR_UI
 	rr_process_watch_uninstall();
 	rr_settings_dialog_uninstall();
@@ -753,6 +1022,10 @@ void obs_module_unload(void)
 	}
 	rr_engine_shutdown();
 	selftest_detach_media();
+	/* Last fallback for the watch selftest's strong ref (an unload without
+	 * the EXIT events, or a watchdog that left its release task behind):
+	 * after this no libobs object of ours is alive. */
+	release_watch_src_ui();
 
 	obs_log(LOG_INFO, "plugin unloaded");
 }

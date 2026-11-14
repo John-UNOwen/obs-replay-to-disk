@@ -1415,7 +1415,9 @@ watch_source_name in rr_config + settings.json. Refresh on every dialog apply
 
 Selftest watch mode (RR_SELFTEST=watch): timer schedule t=3 spawn foreground
 app / 12 check autostart+follow / 15 spawn hidden app / 21 check background
-ignored + terminate app / 28 check buffer kept running. The source is a
+ignored + terminate app / 28 check buffer kept running; cleanup + stop +
+finish are not a scheduled tick but run at loop exit, RR_SELFTEST_RUN seconds
+(default 120). The source is a
 standalone window_capture created by the selftest and pinned via
 rr_process_watch_pin_source (no scene touches from the watchdog thread).
 Watch exes: the rig compiles private scratch apps (rr-watch-app GUI +
@@ -1440,3 +1442,286 @@ own child instead of WM_CLOSE).
 
 Gates green at this commit (both configs build clean /W4-cl, ctest 3/3,
 gersemi+clang-format clean).
+
+## Post-checkup fixes round 3: 19 problems, all fixed — rig-verified 2026-11-14
+
+- Scope: the checkup ran over the three feature commits `b0f194c` (settings
+  source), `d9b19ff` (0.2.0) and `abe462a` (process watcher) and found 19
+  problems: the watcher source-lifetime bug behind the collection-switch
+  dialog, a batch of wrong-inheritance mapping bugs in the settings source,
+  watcher bookkeeping gaps, and selftest hygiene. All 19 are fixed in the
+  tree on top of `abe462a`; nothing committed (owner's call), no version
+  bump. README, this file and docs/manual-tests.md carry the doc updates.
+- OBS 33 source claims were checked against `.deps/obs-studio-33.0.1`, not
+  memory: the orphan check in `OBSBasic::ClearSceneData`
+  (frontend/widgets/OBSBasic_SceneCollections.cpp) is what turns a lingering
+  plugin refcount into the "Source Cleanup Error" box; `allowsMultiTrack`
+  (frontend/utility/AdvancedOutput.cpp:281-291) gates the multi-track stream
+  mask on an srt/rist service protocol; the encoder JSON's raw-options key is
+  `x264opts` (plugins/obs-x264/obs-x264.c); `WINDOW_PRIORITY_EXE = 2`
+  (libobs/util/windows/window-helpers.h) is an INT combo value on both
+  captures.
+- Gate note on evidence: the rig's OBS log folder keeps only recent runs, so
+  every cited run below stores its OBS log as `runs/<tag>/obs-log.txt`.
+  `watch-r4` (14:34) and `watch-i4` (14:52) passed at fix time but their
+  OBS-side log files were later rotated; `watch-r7` is the full re-proof on
+  the final build with everything pinned.
+- Gates re-run on the fixed tree: `cmake --build build_x64 --config
+  RelWithDebInfo` exit 0; `--config Debug` exit 0; `ctest --test-dir
+  build_x64 -C Debug` → `100% tests passed, 0 tests failed out of 3` (core,
+  rename, ffmpeg_load); `gersemi --check CMakeLists.txt` exit 0;
+  `clang-format --dry-run -Werror` over the four changed `src` files exit 0.
+
+- 1. Watcher held its own strong ref to the follow source. The
+  cached `obs_source_t *` outlived `obs_source_remove`, so a scene-collection
+  switch hit ClearSceneData's orphan check: "Not all sources were cleared",
+  clearingFailed, and LoadData answered the critical "Source Cleanup Error
+  … OBS Studio will now exit" box. The uuid cache also kept following a
+  deleted source. Fix in `src/ui/process-watch.cpp`: the cache now holds only
+  a weak ref (`follow_target()`, :357) — `obs_weak_source_get_source` answers
+  honestly about a dead source, and any miss re-walks the scenes, which is
+  also the delete-then-re-add recovery; `watch_frontend_event` (:507) drops
+  the cache on SCENE_COLLECTION_CHANGING/CLEANUP/EXIT (CLEANUP fires inside
+  ClearSceneData before the enumeration, and `on_event` lets only it and EXIT
+  through while a collection load runs); the hook is added at watcher install
+  (:528) and removed at uninstall. The selftest's own strong ref gets the
+  same treatment in `src/plugin-main.c` (:926: released on
+  SCRIPTING_SHUTDOWN/CHANGING/CLEANUP, before the teardown that would flag
+  it).
+- 2. Editing the process-names list faked a rising edge. The baseline
+  was compared across list changes: adding an already-running app's name made
+  the next tick "start" it. The snapshot only ever counts listed names, so it
+  is meaningful only against the list it was taken against: `watch_tick`
+  re-seeds the baseline from the current snapshot when the parsed list
+  changes (`src/ui/process-watch.cpp:438-458`).
+- 3. The selftest watchdog called libobs off the UI thread. It read
+  the pinned source's settings and ran the final unpin+release on its own
+  thread, racing the watcher's 2 s `obs_source_update` (obs-data.c has no
+  lock) and its UI-thread weak-ref cache. Fix: both operations became
+  `obs_queue_task(OBS_TASK_UI, ...)` tasks with a bounded, polled event wait
+  (`watch_ui_task`/`watch_run_ui_task`, `src/plugin-main.c:506,:558`); if OBS
+  is closing the worker leaves the wait and the UI-thread handlers
+  (frontend-event + module unload) do the release instead — every site is
+  idempotent.
+- 4. A vanished follow source ended the follow silently. The old code
+  recorded `g_last_followed = exe` even when `retarget()` had failed to find
+  the source, so the watcher believed it was done: one warning, then forever
+  silent while the app was foreground. `retarget()` now returns success and
+  the bookkeeping records the follow only on true (:381,:496); the
+  already-following path first proves the weak ref is still alive (:478);
+  `warn_follow_failure` (:331) keeps failure visible on the same schedule the
+  README now states — the first tries every 2 s, then about every 30 s, fresh
+  streak per exe and per follow reset.
+- 5. `priority` written as the string "exe". On both window_capture
+  and game_capture it is an INT combo; a string read back as 0 =
+  WINDOW_PRIORITY_CLASS, so following keyed on the window title and a title
+  change dropped the window. Now `obs_data_set_int(s, "priority", 2)` —
+  WINDOW_PRIORITY_EXE (`src/ui/process-watch.cpp:410`).
+- 6. The dialog silently truncated oversized free text. `snprintf`
+  into the fixed config fields cut a long names list (or folder/format/extra
+  box) mid-text, possibly mid-UTF-8-character, and reload showed the shortened
+  value as if it had been what was typed. `apply()` now UTF-8-encodes each
+  typed field and, at or over capacity, names the field, the byte count and
+  the limit in a warning box (`Error.FieldTooLong`) and refuses to save
+  (`src/ui/settings-dialog.cpp:546-571`). `copy_utf8_field()` (:473) keeps a
+  UTF-8-boundary-safe cut for the display-only source label. The harness
+  mirroring both (%TEMP%\dsh-scratch\Disk-Replay-Buffer\test-copy-utf8.ps1,
+  12 cases incl. CJK/emoji cuts and the 1023/1024 boundary) is ALL PASS.
+- 7. Renaming the follow source prompted a buffer restart.
+  `config_equal` compared `watch_source_name`, a display label re-collected
+  live from the scene tree, so any rename read as a settings change. The
+  follow identity is the uuid; the name is out of the comparison and the
+  comment says why (`src/ui/settings-dialog.cpp:53-69`).
+- 8. Advanced streaming audio ignored the service protocol. The mask
+  was `StreamMultiTrackAudioMixes` when set, else `TrackIndex`. OBS 33 applies
+  the multi-track mask only for a service whose protocol starts with srt or
+  rist (AdvancedOutput.cpp:281-291); for RTMP-class services it streams the
+  single TrackIndex track. `service_allows_multi_track()` mirrors that
+  (`src/plugin/settings-source.c:323`) and both branches log the decision
+  with the protocol, so a wrong choice is visible in the log (:333-365).
+- 9. Simple-mode recording took the audio bitrate from the advanced keys
+  (critical). Advanced recording was fine per-track, but simple recording
+  fell through to AdvOut/Track1Bitrate — which OBSBasic seeds with 160 in
+  every profile — overriding the configured `SimpleOutput/ABitrate` with 160
+  silently. OBS 33 uses `GetAudioBitrate()` (= ABitrate) for the simple
+  stream encoder and the simple recording track encoders alike
+  (SimpleOutput.cpp:175-202,:260-269); `inherited_audio_bitrate()` now
+  inherits ABitrate for all simple-mode sources
+  (`src/plugin/settings-source.c:298-315`).
+- 10. Recording "same as stream" inherited the streaming audio too.
+  The delegation called the whole streaming resolve, so the record used the
+  stream's track mask and bitrate. OBS shares only the video encoder — the
+  recording output still runs on the RecTracks-selected recordTrack[]
+  encoders at Track<i>Bitrate (AdvancedOutput.cpp:348,:364-394,:522-527).
+  The video half was split into `resolve_streaming_video()` and the shared
+  case now follows that only; recording audio always comes from the recording
+  settings (`src/plugin/settings-source.c:399-446`).
+- 11. Extra encoder JSON inherited a key that does not exist. The old
+  code read the encoder JSON's `settings` string — OBS 33 encoder JSONs hold
+  the encoder's own property values and have no such key, so inheritance was
+  always a silent no-op and the x264 options box was never carried. The raw
+  options box is the string key `x264opts` (obs-x264.c:115,:217,:544); when
+  the JSON has it non-empty, the plugin now sets the extra JSON to
+  `{"x264opts":"<raw>"}` serialized through obs_data (so the string is
+  JSON-escaped) — the engine merge then reproduces OBS's encoder settings
+  (`src/plugin/settings-source.c:211-247`); otherwise extra resets to `{}`
+  as before. Header comment and README now describe the real behavior; the
+  old "settings"-key claim is gone.
+- 12. Quality level came from the first key present. Encoder JSONs
+  keep old values when the rate control changes, so a now-CQP profile with a
+  leftover `crf` inherited the stale number. `rc_quality_key()` (:161) maps
+  the JSON's `rate_control` to its level key (crf/cqp/icq_quality/ldcq);
+  first-present is only the fallback with a logged warning when the matching
+  key is absent (:185-205).
+- 13. NVENC rate controls mapped blindly. `lossless` fell into the
+  bitrate branch and inherited a hidden, possibly stale bitrate; lossless
+  records raw frames that CBR/CQP cannot mirror. It now warns and keeps the
+  plugin's manual encoder, rate control and bitrate — the documented
+  fallback, same shape as simple-mode Lossless (`rc_is_lossless` +
+  `apply_advanced_encoder`, `src/plugin/settings-source.c:147,:250-266`).
+  CQVBR stays CBR-at-bitrate (OBS itself feeds that bitrate into the
+  encoder's rate-control parameters; its `target_quality` is not a QP
+  constant quality could express).
+- 14. A zero recording mask fell back to track 1 in both modes. OBS
+  33 advanced recording with no RecTracks (legacy profiles) uses
+  `AdvOut/TrackIndex` as the mask itself (AdvancedOutput.cpp:356-362);
+  simple recording records silent. `recording_audio_mask()` mirrors both,
+  with the plugin's own track-1 clamp only behind that
+  (`src/plugin/settings-source.c:366-397`).
+- 15. The autostart baseline ran even while the toggle was off. Same
+  list-relative flaw as 2, other half: the old code snapshotted the process
+  table every tick regardless of watch_autostart, and nothing re-baselined
+  when the toggle itself changed — correctness rode on the disabled ticks
+  keeping the baseline fresh by accident. The snapshot is now skipped
+  entirely while the toggle is off, and every dialog Apply calls
+  `rr_process_watch_refresh`, which drops the baseline
+  (`src/ui/process-watch.cpp:438,:554-567`), so the first tick after enabling
+  seeds it without firing.
+- 16. The selftest leaked the children's handles. `hThread` was
+  never closed and `hProcess` survived TerminateProcess — kernel handles held
+  for the whole OBS session per spawned app. Thread handles close right where
+  acquired, process handles after the final terminate, both nulled; a failed
+  `CreateProcessW` zeroes the struct so the end-of-run NULL guards can never
+  act on garbage (`src/plugin-main.c:403-443,:698-714`).
+- 17. The hidden child's command line was unquoted. The scratch apps
+  live under paths with spaces, and the child builds argv from that line:
+  argv[0] broke at the first space. The exe path is now quoted
+  (`src/plugin-main.c:416-425`); a scratch argv harness shows the difference
+  (unquoted: `argc=5`, argv[0] cut at the first space of the profile path;
+  quoted: `argc=4`, full path intact).
+- 18. Stale schedule comment. The header block described cleanup
+  at t=30; the code checks kept-running at t>=28 and cleans up at loop exit
+  (t>=RR_SELFTEST_RUN). Comment corrected (`src/plugin-main.c:336-355`) and
+  the watcher section above got the same clarification.
+- 19. The watch selftest left its test config in the live settings
+  (major). `g_settings = cfg` injected the run's test watch list, uuid and
+  folders and nothing restored them: until OBS exited the watcher kept
+  warning "the follow source is not in any scene anymore" on foreground
+  switches to a listed test app, could autostart buffers into the selftest
+  directories, and the dialog showed test values. The run snapshots the live
+  settings right before the injection and its end-of-run UI task restores
+  the whole snapshot, then refreshes the watcher before releasing the test
+  source (`src/plugin-main.c:785` save, `restore_watch_settings_ui()` :496).
+
+New rig evidence (all on the final build; each run dir under `.testrig/runs/`
+holds `obs-log.txt`):
+
+- Watcher regression `watch-r7`, all five checks ok
+  (`selftest: watch summary autostart=1 follow=1 follow-retry=1
+  background-away=1 kept-running-after-exit=1`,
+  `selftest finished: ok watch mode (foreground app start+follow,
+  delete/re-add re-follows, background app ignored, start-only honored)`).
+  Rising edge within a tick of the spawn (`16:33:55.552: process watcher:
+  rr-watch-app.exe started, starting the buffer` for the spawn at
+  `16:33:54.817`, later `watch check autostart ok (state=2)`), follow
+  (`process watcher: 'rr_watch_selftest' now follows rr-watch-app.exe`), and
+  after process exit the buffer kept running (`kept-running-after-exit ok
+  (state=2)`).
+- Issues 1+4, delete → warn → recover, from the same run: at t=13 the test
+  releases the source's last ref (the watcher pin is only weak, so the source
+  really goes away) — `16:34:05.553: process watcher: the follow source is
+  not in any scene anymore; pick it again in the dialog` and again at
+  `16:34:07.553`, no `now follows` line for the dead source; re-added under
+  the same uuid at t=16 and on the next tick
+  `16:34:09.553: process watcher: 'rr_watch_selftest_re' now follows
+  rr-watch-app.exe`, `watch check follow-retry ok`. No
+  "Not all sources were cleared" anywhere; shutdown ends `All scene data
+  cleared`. The collection switch itself (the dialog this replaces) needs two
+  real scene collections — added to docs/manual-tests.md, with the throttled
+  warning pattern and switch-back auto-re-follow as the expected behavior.
+- Issue 5: the source's own settings echo resolves the window through the
+  process, which CLASS priority would not — `[window-capture:
+  'rr_watch_selftest'] update settings: / executable: rr-watch-app.exe`.
+- Issue 19: right after the summary, `selftest: watch live settings
+  restored` (16:34:26 in the run above), and the log is silent of
+  follow-source warnings from the summary through OBS shutdown. A
+  first draft of this section cited runs `i19chk-s1`/`i19chk-s2` as a
+  follow-up probe on the restored baseline; that citation was wrong and is
+  retracted: those runs actually happened 30 minutes before watch-r7, while
+  the Advanced-mode test profile was still in place, and their logs are gone
+  from OBS's log retention by now. The valid probe is
+  `i19b-stream`/`i19b-record` (16:56/16:57, simple baseline profile, logs
+  archived as `evidence.log` in the run dirs so retention cannot rotate
+  them away): `settings source: streaming settings (simple output): encoder
+  obs_x264, CBR 6000 kbps, audio tracks 0x01 at 160 kbps` and, in the
+  recording run, `the recording quality is 'same as stream', following the
+  streaming settings` + `recording settings (simple output): ... at 160
+  kbps`, both `selftest finished: ok buffer ran 25s` with zero
+  "process watcher" lines — after a watch test the watcher is inert and
+  silent until a toggle is on.
+- Issue 8, TrackIndex path `adv-t3s` (Mode=Advanced, TrackIndex=3,
+  StreamMultiTrackAudioMixes left at OBS's default 1, the rig's service —
+  protocol RTMP): `settings source: service protocol 'RTMP' does not carry
+  multi-track streaming audio, following AdvOut/TrackIndex (track 3)`,
+  `streaming settings (advanced output): encoder obs_x264, CBR 30000 kbps,
+  audio tracks 0x04 at 160 kbps`, engine
+  `[FFmpeg aac encoder: 'rr_audio_0'] bitrate: 160, ..., track: 3` — the
+  default mask 0x01 was correctly ignored. (Track 3 is mask 0x04: OBS numbers
+  the bits bit(track−1), cf. RecTracks 0x03 → tracks 1+2 below; the checkup
+  text's "0x08 (track 3)" had the bit off by one.)
+- Issue 8, mask path `adv-srt2` (same ini, service switched to rtmp_custom
+  with `server: srt://127.0.0.1:9999`, StreamMultiTrackAudioMixes=5):
+  `settings source: service protocol 'SRT' carries multi-track streaming
+  audio, following the StreamMultiTrackAudioMixes mask 0x05`, `audio tracks
+  0x05 at 160 kbps`, encoders on `track: 1` and `track: 3`. The service.json
+  was created for the run and deleted with it.
+- Issue 10 `adv-t3r` (advanced, RecEncoder=none shared,
+  RecTracks=3, Track1Bitrate=128, plugin's own audio bitrate 256):
+  `the recording reuses the streaming video encoder, following the streaming
+  video settings only` — and audio still from the recording settings:
+  `recording settings (advanced output): ... audio tracks 0x03 at 128 kbps`,
+  two AAC encoders `bitrate: 128 ... track: 1` and `track: 2`.
+- Issue 9 `i9-simple-rec128` (simple, ABitrate=128, RecQuality=Small, plugin
+  audio bitrate 256, AdvOut/Track1Bitrate still seeded 160):
+  `recording settings (simple output): encoder obs_x264, CQP quality 23,
+  audio tracks 0x01 at 128 kbps`, `[FFmpeg aac encoder: 'rr_audio_0']
+  bitrate: 128` — ABitrate wins, not the seeded 160.
+- Issue 14 `i14-adv-legacy` (advanced, RecTracks=0, TrackIndex=3):
+  `the recording has no RecTracks mask (legacy configuration), following
+  AdvOut/TrackIndex as the track mask 0x03 like OBS`, `audio tracks 0x03`.
+- Issue 11 `adv-x264` (streamEncoder.json with `"x264opts":"preset=slow"`,
+  CBR 43000): `[x264 encoder: 'rr_video'] preset: slow` plus `bitrate:
+  43000` — the raw options string reached the encoder through the inherited
+  extra JSON.
+- Issue 12 `adv-qmatch` (streamEncoder.json `rate_control=CQP` with a stale
+  `crf:16` alongside `cqp:28`): `streaming settings ... CQP quality 28` and
+  `[x264] crf: 28` — the key matching the rate control wins, not the first
+  key present. `adv-qfb` (rate_control=ICQ, only `crf:16` present):
+  `rate control 'ICQ' has no 'icq_quality' value in the profile encoder
+  settings, inheriting the first quality level found instead`, `crf: 16`.
+- Issue 13 `i13-lossless` (streamEncoder.json rate_control=lossless):
+  `settings source: the encoder settings in streamEncoder.json use rate
+  control 'lossless', which records raw frames the replay buffer cannot
+  mirror: keeping the plugin encoder, rate control and bitrate`, then the
+  plugin's own values in the summary (`encoder automatic, CBR 30000 kbps`).
+  `i13-cqvbr` (rate_control=CQVBR, bitrate 5555): `CBR 5555 kbps` and the
+  encoder line `bitrate: 5555`.
+- Issues 6/7 have no runtime log line by nature: the truncation logic is
+  harness-verified (item 6 above); the rename-churn fix and the over-long
+  message box are the manual-test items in docs/manual-tests.md.
+
+Rig state after the round: profile restored to baseline (simple mode,
+VBitrate 6000, ABitrate 160, RecQuality Stream, RecTracks 1, Track1Bitrate
+160, no encoder json, no service.json); watch exes stay under
+%TEMP%\dsh-scratch\Disk-Replay-Buffer\watchapps (built by
+`.testrig/scripts/build-watch-apps.ps1`); nothing committed, nothing pushed.

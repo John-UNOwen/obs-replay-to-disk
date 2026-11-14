@@ -5,17 +5,27 @@
  *   the user-picked window/game capture source at that window. Only the
  *   foreground moves the source: an app from the list that merely starts in
  *   the background never steals the capture, and switching away from a listed
- *   app (Discord, desktop, ...) keeps the last followed window.
+ *   app (Discord, desktop, ...) keeps the last followed window. A follow
+ *   source that goes away (deleted, or turned into a non-capture) does not
+ *   end the follow: the watcher retries on every tick, warns with a throttled
+ *   sequence (first tries, then about every 30 s), and follows again on its
+ *   own as soon as a source answers the uuid again.
  * - watch_autostart: when a listed exe appears in the process table
  *   (rising edge) and the buffer is off, start it. Start only: the watcher
  *   never stops the buffer, and a stop while the process runs is respected
- *   until the process starts again.
+ *   until the process starts again. The baseline is re-seeded whenever the
+ *   list or the toggle changes, so an already-running app is never treated
+ *   as a start.
  *
  * The source is retargeted exactly the way OBS's own picker encodes its combo
  * value (title:class:exe with # -> #22 and : -> #3A, see
  * libobs/util/windows/window-helpers.c add_window), so the source behaves as
  * if the user had picked the window in the source dialog. priority is pinned
  * to "exe" so a changing window title does not break the match.
+ *
+ * Lifetime rule: the watcher holds no strong source reference between ticks —
+ * only a weak ref plus the uuid — because OBS 33 refuses to switch scene
+ * collections while a plugin still holds one. See follow_target().
  * License: GPL-2.0-or-later.
  */
 
@@ -281,57 +291,132 @@ static QStringList process_names_snapshot(const QStringList &wanted)
 /* ------------------------------------------------------------- the watcher */
 
 static QTimer *g_watch_timer = nullptr;
-static obs_source_t *g_cached_src = nullptr; /* our own ref */
+static obs_weak_source_t *g_cached_weak = nullptr; /* never keeps a source alive */
 static QString g_cached_uuid;
-static QString g_last_followed; /* lower exe currently followed, "" = none */
+static QString g_last_followed;   /* lower exe currently followed, "" = none */
+static QString g_follow_warn_exe; /* exe of the current retarget failure streak */
+static int g_follow_warns;        /* consecutive retarget failures for that exe */
 static QStringList g_prev_procs;
 static bool g_have_prev = false;
+static QStringList g_prev_wanted; /* the parsed watch_names the baseline was taken against */
+static bool g_watch_event_hooked = false;
 
 static void drop_cached_src(void)
 {
-	if (g_cached_src)
-		obs_source_release(g_cached_src);
-	g_cached_src = nullptr;
+	if (g_cached_weak)
+		obs_weak_source_release(g_cached_weak);
+	g_cached_weak = nullptr;
 	g_cached_uuid.clear();
 }
 
-static void retarget(const char *source_id, HWND hwnd, const QString &exe)
+/* Follow bookkeeping. g_last_followed may only ever claim "the source follows
+ * this exe right now": watch_tick records it only after a successful
+ * retarget(), and a failed one leaves it alone so the next tick retries.
+ * Every site that drops the follow drops the warning streak with it — the
+ * next failure is a fresh context (new source, new settings, new run) and
+ * must warn from the top again. */
+static void reset_follow_state(void)
 {
-	const QString uuid = QString::fromUtf8(source_id);
-	if (!g_cached_src || g_cached_uuid != uuid) {
-		drop_cached_src();
-		g_cached_src = find_capture_source_by_uuid(source_id);
-		if (!g_cached_src) {
-			obs_log(LOG_WARNING,
-				"process watcher: the follow source is not in any scene anymore; pick it again in the "
-				"dialog");
-			g_last_followed.clear();
-			return;
-		}
-		g_cached_uuid = uuid;
+	g_last_followed.clear();
+	g_follow_warns = 0;
+	g_follow_warn_exe.clear();
+}
+
+/* A failed retarget repeats on every tick while the listed app stays in the
+ * foreground. Warn for the first few tries and then every 15th (~30 s at the
+ * 2 s tick), so a vanished follow source can never go silently dead while the
+ * app is up, and the log never spams every two seconds. A different exe
+ * starts a new streak, so foregrounding another listed app always warns
+ * immediately again. */
+static void warn_follow_failure(const QString &exe, const QString &msg)
+{
+	if (exe != g_follow_warn_exe) {
+		g_follow_warn_exe = exe;
+		g_follow_warns = 0;
+	}
+	if (++g_follow_warns <= 3 || g_follow_warns % 15 == 0)
+		obs_log(LOG_WARNING, "process watcher: %s", msg.toUtf8().constData());
+}
+
+/* The watcher keeps a *weak* ref to the follow source, so it never holds one
+ * across an OBS scene teardown. OBS 33 ClearSceneData (scene-collection switch,
+ * coordinate-mode migration, collection removal) removes every scene item,
+ * pumps the destroy queue and then enumerates what is left: anything still
+ * refcounted — even by a plugin — is logged as "Not all sources were cleared",
+ * sets clearingFailed, and LoadData answers with the critical "Source Cleanup
+ * Error" box and closes OBS. A weak ref does not show up there.
+ *
+ * It also gives the honest answer about a deleted source: obs_weak_source_get_source
+ * returns NULL once the source is gone (libobs removes the uuid hash entry when
+ * the source is destroyed), so the cache cannot keep "following" an orphan. Any
+ * uuid mismatch or dead weak ref drops the cache and re-walks the scenes, which
+ * is what makes a source that was deleted, or deleted and re-added under the
+ * same uuid, recover.
+ *
+ * The strong ref returned here belongs to one retarget() call only. */
+static obs_source_t *follow_target(const char *uuid)
+{
+	const QString id = QString::fromUtf8(uuid);
+	if (g_cached_weak && g_cached_uuid == id) {
+		obs_source_t *src = obs_weak_source_get_source(g_cached_weak);
+		if (src)
+			return src;
 	}
 
-	if (!is_capture_id(obs_source_get_id(g_cached_src))) {
-		obs_log(LOG_WARNING, "process watcher: the follow source is no longer a window/game capture");
-		g_last_followed.clear();
-		return;
+	drop_cached_src(); /* a different source, or the cached one has died */
+
+	obs_source_t *src = find_capture_source_by_uuid(uuid);
+	if (src) {
+		g_cached_weak = obs_source_get_weak_source(src);
+		g_cached_uuid = id;
+	}
+	return src;
+}
+
+/* Points the follow source at hwnd. Returns true only when the source follows
+ * exe afterwards; the caller records that in g_last_followed. A false leaves
+ * the bookkeeping alone, so the next tick tries again — a deleted or
+ * replaced follow source is retried until follow_target resolves the uuid
+ * again, and warn_follow_failure keeps that visible in the log. */
+static bool retarget(const char *source_id, HWND hwnd, const QString &exe)
+{
+	obs_source_t *src = follow_target(source_id);
+	if (!src) {
+		warn_follow_failure(exe, QStringLiteral("the follow source is not in any scene anymore; "
+							"pick it again in the dialog"));
+		return false;
+	}
+
+	if (!is_capture_id(obs_source_get_id(src))) {
+		obs_source_release(src);
+		warn_follow_failure(exe, QStringLiteral("the follow source is no longer a window/game capture"));
+		return false;
 	}
 
 	const QString selector = build_selector(hwnd);
 	if (selector.isEmpty()) {
-		obs_log(LOG_WARNING, "process watcher: could not read the foreground window target for %s",
-			exe.toUtf8().constData());
-		return;
+		obs_source_release(src);
+		warn_follow_failure(exe,
+				    QStringLiteral("could not read the foreground window target for %1.exe").arg(exe));
+		return false;
 	}
 
 	obs_data_t *s = obs_data_create();
 	obs_data_set_string(s, "window", selector.toUtf8().constData());
-	obs_data_set_string(s, "priority", "exe");
-	obs_source_update(g_cached_src, s);
+	/* "priority" is an OBS_COMBO_FORMAT_INT setting on both captures
+	 * (window-capture.c and game-capture.c read it with obs_data_get_int);
+	 * 2 = WINDOW_PRIORITY_EXE from libobs/util/windows/window-helpers.h.
+	 * A string item reads back as 0 = WINDOW_PRIORITY_CLASS. */
+	obs_data_set_int(s, "priority", 2); /* WINDOW_PRIORITY_EXE */
+	obs_source_update(src, s);
 	obs_data_release(s);
 
-	obs_log(LOG_INFO, "process watcher: '%s' now follows %s.exe", obs_source_get_name(g_cached_src),
+	obs_log(LOG_INFO, "process watcher: '%s' now follows %s.exe", obs_source_get_name(src),
 		exe.toUtf8().constData());
+	obs_source_release(src);
+	g_follow_warns = 0;
+	g_follow_warn_exe.clear();
+	return true;
 }
 
 static void watch_tick(void)
@@ -341,31 +426,41 @@ static void watch_tick(void)
 
 	const QStringList wanted = parse_watch_list(cfg.watch_names);
 
-	/* Rising-edge process starts: tracked even while disabled, so enabling
-	 * mid-session never fires on processes that were already running. */
-	const QStringList procs = process_names_snapshot(wanted);
-	if (cfg.watch_autostart && g_have_prev) {
-		for (const QString &name : procs) {
-			if (g_prev_procs.contains(name))
-				continue;
-			struct rr_status st;
-			rr_engine_get_status(&st);
-			if (st.state == RR_STATE_OFF) {
-				obs_log(LOG_INFO, "process watcher: %s.exe started, starting the buffer",
-					name.toUtf8().constData());
-				rr_plugin_start();
-			} else {
-				obs_log(LOG_INFO, "process watcher: %s.exe started, buffer already running",
-					name.toUtf8().constData());
+	/* Rising-edge process starts (watch_autostart). The snapshot only ever
+	 * counts names on the list, so the baseline is meaningful only against
+	 * the list it was taken against: when the parsed list changes, re-seed
+	 * the baseline from the current snapshot before comparing, so an app
+	 * that was already running when its name was added is not treated as a
+	 * start (README). No snapshot is taken while the setting is off;
+	 * toggling watch_autostart goes through the dialog, and every Apply
+	 * calls rr_process_watch_refresh, which drops the baseline — so the
+	 * first tick after enabling seeds it without firing. */
+	if (cfg.watch_autostart) {
+		const QStringList procs = process_names_snapshot(wanted);
+		if (g_have_prev && wanted == g_prev_wanted) {
+			for (const QString &name : procs) {
+				if (g_prev_procs.contains(name))
+					continue;
+				struct rr_status st;
+				rr_engine_get_status(&st);
+				if (st.state == RR_STATE_OFF) {
+					obs_log(LOG_INFO, "process watcher: %s.exe started, starting the buffer",
+						name.toUtf8().constData());
+					rr_plugin_start();
+				} else {
+					obs_log(LOG_INFO, "process watcher: %s.exe started, buffer already running",
+						name.toUtf8().constData());
+				}
 			}
 		}
+		g_prev_procs = procs;
+		g_prev_wanted = wanted;
+		g_have_prev = true;
 	}
-	g_prev_procs = procs;
-	g_have_prev = true;
 
 	/* Foreground follow */
 	if (!cfg.watch_follow || !cfg.watch_source_id[0] || wanted.isEmpty()) {
-		g_last_followed.clear();
+		reset_follow_state();
 		drop_cached_src();
 		return;
 	}
@@ -379,17 +474,60 @@ static void watch_tick(void)
 		return; /* OBS itself, no window, or elevated: keep the last target */
 	if (!wanted.contains(exe))
 		return; /* not a followed app: keep the last target */
-	if (exe == g_last_followed)
-		return; /* already following this app */
 
-	retarget(cfg.watch_source_id, fg, exe);
-	g_last_followed = exe;
+	if (exe == g_last_followed) {
+		/* The same listed app is still foreground. Keep the last target,
+		 * but confirm the followed source is still alive first: while the
+		 * cached weak ref resolves this is one atomic get and no scene
+		 * walk. If the source died since (deleted while followed), the
+		 * bookkeeping cannot keep claiming it follows — clear only
+		 * g_last_followed here (a reset_follow_state() would restart the
+		 * warning streak every tick), and the retry path below reports
+		 * the loss and re-follows as soon as a source answers the uuid. */
+		obs_source_t *src = follow_target(cfg.watch_source_id);
+		if (src) {
+			obs_source_release(src);
+			return;
+		}
+		g_last_followed.clear();
+	}
+
+	if (retarget(cfg.watch_source_id, fg, exe))
+		g_last_followed = exe;
+}
+
+/* OBS is about to tear down (or has torn down) every scene source. OBS 33
+ * ClearSceneData fires CLEANUP from inside itself, after it removed all scene
+ * items and just before it enumerates the sources that are left — that
+ * enumeration is what turns a lingering refcount into the "Source Cleanup
+ * Error" box, and OBSStudioAPI::on_event lets only CLEANUP and EXIT through
+ * while disableSaving is set (OBSStudioAPI.cpp), so CLEANUP is the hook that
+ * matters; CHANGING fires earlier, at the request to switch or drop the
+ * collection. The watcher is UI-thread only, and so is this callback. */
+static void watch_frontend_event(enum obs_frontend_event event, void *data)
+{
+	UNUSED_PARAMETER(data);
+
+	switch (event) {
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
+	case OBS_FRONTEND_EVENT_EXIT:
+		drop_cached_src();
+		reset_follow_state();
+		break;
+	default:
+		break;
+	}
 }
 
 extern "C" void rr_process_watch_install(void)
 {
 	if (g_watch_timer)
 		return;
+	if (!g_watch_event_hooked) {
+		obs_frontend_add_event_callback(watch_frontend_event, NULL);
+		g_watch_event_hooked = true;
+	}
 	g_watch_timer = new QTimer(qApp);
 	QObject::connect(g_watch_timer, &QTimer::timeout, []() { watch_tick(); });
 	g_watch_timer->start(RR_WATCH_INTERVAL_MS);
@@ -402,28 +540,45 @@ extern "C" void rr_process_watch_uninstall(void)
 		delete g_watch_timer;
 		g_watch_timer = nullptr;
 	}
+	if (g_watch_event_hooked) {
+		obs_frontend_remove_event_callback(watch_frontend_event, NULL);
+		g_watch_event_hooked = false;
+	}
 	drop_cached_src();
-	g_last_followed.clear();
+	reset_follow_state();
 	g_prev_procs.clear();
+	g_prev_wanted.clear();
 	g_have_prev = false;
 }
 
 extern "C" void rr_process_watch_refresh(void)
 {
 	/* settings changed: re-follow the current foreground, re-find the source */
-	g_last_followed.clear();
+	reset_follow_state();
 	drop_cached_src();
+	/* Drop the autostart baseline too: it is list-relative, and an Apply is
+	 * the only way watch_names or the watch_autostart toggle changes outside
+	 * the selftest. The next tick re-seeds it from the current process set,
+	 * so enabling the toggle or adding an already-running app's name to the
+	 * list never counts as a rising edge (README). */
+	g_prev_procs.clear();
+	g_prev_wanted.clear();
+	g_have_prev = false;
 }
 
 /* Selftest hook: cache this source directly (retarget skips the scene walk
  * while the uuid matches), so the test does not have to touch the scene
- * graph from the watchdog thread. The watcher holds its own ref. */
+ * graph from the watchdog thread. Only a weak ref is taken: the test owns the
+ * source, and the watcher must not be the reason it outlives a scene teardown.
+ * UI thread only, like every other watcher entry point: the cache drop here
+ * is not atomic against a timer tick. The selftest watchdog reaches it
+ * through an OBS_TASK_UI task, never directly. */
 extern "C" void rr_process_watch_pin_source(obs_source_t *src, const char *uuid)
 {
 	drop_cached_src();
-	g_last_followed.clear();
+	reset_follow_state();
 	if (!src || !uuid || !*uuid)
 		return;
-	g_cached_src = obs_source_get_ref(src);
+	g_cached_weak = obs_source_get_weak_source(src);
 	g_cached_uuid = QString::fromUtf8(uuid);
 }

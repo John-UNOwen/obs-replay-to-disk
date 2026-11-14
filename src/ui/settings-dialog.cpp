@@ -49,7 +49,13 @@
 static ReplayToDiskDialog *g_dialog = nullptr;
 
 /* The widgets carry in-range values (spin ranges, 30..1800 length), so only
- * the free-text fields can differ from the saved copy after a clamp. */
+ * the free-text fields can differ from the saved copy after a clamp.
+ * watch_source_name is deliberately NOT compared: it is a display-only
+ * "Scene/Name" label re-collected from OBS's live scene tree on every
+ * collect(), while the persisted copy carries the name at the last save. The
+ * follow source's identity is watch_source_id (uuid-stable across renames), so
+ * renaming the source or its scene in OBS must not read as a settings change
+ * and offer a buffer restart. */
 static bool config_equal(const struct rr_config &a, const struct rr_config &b)
 {
 	return a.settings_source == b.settings_source && a.autostart == b.autostart &&
@@ -60,8 +66,7 @@ static bool config_equal(const struct rr_config &a, const struct rr_config &b)
 	       strcmp(a.extra_encoder_settings, b.extra_encoder_settings) == 0 && a.audio_tracks == b.audio_tracks &&
 	       a.audio_bitrate_kbps == b.audio_bitrate_kbps && a.save_sound == b.save_sound &&
 	       a.watch_autostart == b.watch_autostart && a.watch_follow == b.watch_follow &&
-	       strcmp(a.watch_names, b.watch_names) == 0 && strcmp(a.watch_source_id, b.watch_source_id) == 0 &&
-	       strcmp(a.watch_source_name, b.watch_source_name) == 0;
+	       strcmp(a.watch_names, b.watch_names) == 0 && strcmp(a.watch_source_id, b.watch_source_id) == 0;
 }
 
 ReplayToDiskDialog::ReplayToDiskDialog(QWidget *parent) : QDialog(parent)
@@ -459,6 +464,26 @@ void ReplayToDiskDialog::reload()
 	refresh_status();
 }
 
+/* Copy text into a fixed-size config field. Text that fits is copied whole;
+ * oversized text is cut at a UTF-8 character boundary, never mid-character,
+ * so settings.json always stays valid UTF-8. Returns false when the text did
+ * not fit (apply() rejects typed fields before saving; the cut here only
+ * guards display-only fields like watch_source_name and the disk-estimate
+ * collect). */
+static bool copy_utf8_field(char *dst, size_t cap, const QByteArray &src)
+{
+	if ((size_t)src.size() < cap) {
+		memcpy(dst, src.constData(), (size_t)src.size() + 1);
+		return true;
+	}
+	size_t n = cap - 1;
+	while (n > 0 && ((unsigned char)src.constData()[(int)n] & 0xC0) == 0x80)
+		n--;
+	memcpy(dst, src.constData(), n);
+	dst[n] = 0;
+	return false;
+}
+
 void ReplayToDiskDialog::collect(struct rr_config *cfg) const
 {
 	*cfg = m_saved;
@@ -487,13 +512,16 @@ void ReplayToDiskDialog::collect(struct rr_config *cfg) const
 	cfg->watch_autostart = m_watchAutostart->isChecked();
 	cfg->watch_follow = m_watchFollow->isChecked();
 	const QByteArray names = m_watchNames->text().toUtf8();
-	snprintf(cfg->watch_names, sizeof(cfg->watch_names), "%s", names.constData());
+	copy_utf8_field(cfg->watch_names, sizeof(cfg->watch_names), names);
 	const int row = m_watchSource->currentIndex();
 	const bool have_src = row > 0 && row < m_watch_srcs.size();
 	snprintf(cfg->watch_source_id, sizeof(cfg->watch_source_id), "%s",
 		 have_src ? m_watch_srcs[row].first.toUtf8().constData() : "");
-	snprintf(cfg->watch_source_name, sizeof(cfg->watch_source_name), "%s",
-		 have_src ? m_watch_srcs[row].second.toUtf8().constData() : "");
+	/* display-only (the uuid is the identity) and it comes from an OBS
+	 * display name of unbounded length, so it may legitimately not fit:
+	 * UTF-8-safe truncation is correct here, a warning would be noise. */
+	copy_utf8_field(cfg->watch_source_name, sizeof(cfg->watch_source_name),
+			have_src ? m_watch_srcs[row].second.toUtf8() : QByteArray());
 }
 
 void ReplayToDiskDialog::update_disk_line()
@@ -509,6 +537,39 @@ bool ReplayToDiskDialog::apply()
 {
 	struct rr_config cfg;
 	collect(&cfg);
+
+	/* A typed value larger than its config field must not be saved cut in
+	 * half: snprintf would silently drop the tail (the end of a process
+	 * name list, possibly mid-UTF-8-character) and reload would then show
+	 * the shortened list as if it were what the user typed. Name the
+	 * field, say how far over it is, and refuse the Apply. */
+	const char *over_key = nullptr;
+	int over_bytes = 0;
+	size_t over_cap = 0;
+	auto check_len = [&](const char *label_key, const QString &text, size_t cap) {
+		if (over_key)
+			return;
+		const int bytes = text.toUtf8().size();
+		if ((size_t)bytes >= cap) {
+			over_key = label_key;
+			over_bytes = bytes;
+			over_cap = cap;
+		}
+	};
+	check_len("Label.BufferDir", m_bufferDir->text(), sizeof(cfg.buffer_dir));
+	check_len("Label.OutputDir", m_outputDir->text(), sizeof(cfg.output_dir));
+	check_len("Label.Filename", m_filename->text(), sizeof(cfg.filename_format));
+	check_len("Label.ExtraSettings", m_extra->toPlainText(), sizeof(cfg.extra_encoder_settings));
+	check_len("Watch.Names", m_watchNames->text(), sizeof(cfg.watch_names));
+	if (over_key) {
+		QString field = rr_qtext(over_key);
+		while (field.endsWith(QLatin1Char(':')))
+			field.chop(1);
+		QMessageBox::warning(
+			this, windowTitle(),
+			rr_qtext("Error.FieldTooLong").arg(field).arg(over_bytes).arg((qlonglong)(over_cap - 1)));
+		return false;
+	}
 
 	/* buffer folder validated against the effective output folder,
 	 * exactly as the engine will at start (5.5 step 2) */
