@@ -83,7 +83,9 @@ target_sources(
 # directory, dependency-first (Windows only applies LOAD_LIBRARY_SEARCH_*
 # to the DLL named in LoadLibraryEx, not to that DLL's own imports). A copy
 # OBS already loaded with the same name (same FFmpeg major) is reused.
-# The closure list must stay in sync with ffmpeg-load.c.
+# The closure list must stay in sync with ffmpeg-load.c. Everything installs
+# flat, next to the plugin DLL — the OBS 33 plugin layout (the bin/64bit
+# nesting is flagged Legacy; see cmake/windows/helpers.cmake).
 if(WIN32 AND FFmpeg_avformat_LIBRARY AND FFmpeg_avcodec_LIBRARY AND FFmpeg_avutil_LIBRARY)
   get_filename_component(RR_FFMPEG_BIN_DIR "${FFmpeg_avutil_LIBRARY}" DIRECTORY)
   set(
@@ -121,7 +123,7 @@ if(WIN32 AND FFmpeg_avformat_LIBRARY AND FFmpeg_avcodec_LIBRARY AND FFmpeg_avuti
     )
   endif()
 
-  install(FILES ${RR_FFMPEG_FILES} DESTINATION "${CMAKE_PROJECT_NAME}/bin/64bit" COMPONENT Runtime)
+  install(FILES ${RR_FFMPEG_FILES} DESTINATION "${CMAKE_PROJECT_NAME}" COMPONENT Runtime)
 endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

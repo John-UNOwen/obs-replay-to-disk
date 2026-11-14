@@ -1281,3 +1281,41 @@ Verified: both workflow files parse as YAML; artifact name/glob match the
 existing `windows-build` upload step. Not exercised on a run — first proof
 is the next `main` push (owned by the owner): a draft "Replay to Disk — dev
 build" should appear under Releases → Drafts.
+
+## OBS 33 flat plugin layout (2026-11-14)
+
+Owner's screenshot from their streaming PC: OBS's Plugin Manager listed
+obs-replay-to-disk with the Legacy badge and "installed to a location that
+will stop working in the future" — and the zip itself caused it. The
+[OBS Legacy Plugin Locations KB](https://obsproject.com/kb/legacy-plugin-locations)
+(2026-09-21) and its [developer page](https://obsproject.com/kb/legacy-plugin-developer-info)
+redefine the supported Windows layout: OBS 33 loads
+`C:\ProgramData\obs-studio\plugins\<name>\<name>.dll` + `data\*` FLAT; the
+previous recommendation `…\<name>\bin\64bit\<name>.dll` — exactly what our
+zip and README shipped — is now itself a Legacy structure, flagged in the
+Plugin Manager and not loaded from OBS 34 (≈ Aug 2027) on. Portable builds
+have the same rule: `<install>\plugins\<name>\` is current, `obs-plugins\`
+is Legacy. (OBS loads the new location first and skips a same-named legacy
+copy, so mixed installs self-heal.)
+
+Changes: `cmake/windows/helpers.cmake` installs the plugin DLL and PDB to
+`${target}/` instead of `${target}/bin/64bit`; the FFmpeg bundle install in
+CMakeLists went flat the same way. `data/` was already correct. CI needs no
+change — the zip's root folder and name are unchanged, only its nesting.
+
+Verified: fresh install tree is flat (`obs-replay-to-disk\{obs-replay-to-disk.dll,
+obs-replay-to-disk.pdb, the 8 FFmpeg DLLs}, data\locale\en-US.ini`), ctest
+3/3, gersemi clean; rig run `flat-t4` (`2026-11-14 08-54-15.txt`) on the
+portable OBS 33.0.1 with the plugin deployed ONLY at
+`.testrig\obs\plugins\obs-replay-to-disk\` (the new portable location):
+loaded from there, FFmpeg preload and both saves green (20.032 s / 31.000 s
+bands, `warnings=0`, 0 leftovers, leaks 1). README install/build text and
+the KB (new reference `obs-plugin-install-layout.md`, fixed
+`release-tag-convention.md` layout sentence) updated with it.
+
+Immediate remedy on the affected machine (their OBS 33 install, our
+README-era zip): with OBS closed, move everything from
+`…plugins\obs-replay-to-disk\bin\64bit\` up into `…plugins\obs-replay-to-disk\`
+next to `data\` — the flat set is what the new layout wants, and our bundled
+FFmpeg dependencies move with the DLL, so the "complex dependencies"
+exception on the OBS page does not apply.
