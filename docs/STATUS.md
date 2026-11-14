@@ -562,11 +562,17 @@
 - WP6 hardening, docs, tag: DONE except owner manual tests — WP3+WP4
   acceptance re-run PASS on the final HEAD (WP6 box above); README and
   `docs/manual-tests.md` written; local tag `v0.1.0`, not pushed.
-- Owner publish checklist: (1) push `main` and the tag `v0.1.0` to GitHub;
-  (2) confirm the CI Windows job builds the release package; (3) publish the
-  GitHub release with that package, stating it requires OBS 33.0.1; (4) run
-  `docs/manual-tests.md` on a real machine with a real game and report the
-  NVENC/AMF/HDR results there; fix what fails and re-tag if needed.
+- Owner publish checklist: (1) push `main` and the tag `0.1.0` to GitHub — the
+  tag must be bare semver: the CI release job in `.github/workflows/push.yaml`
+  only creates a release for tags matching `X.Y.Z` (plus `-rc`/`-beta` forms)
+  and silently builds nothing for a `v`-prefixed tag (that is why the tag was
+  moved from `v0.1.0` to `0.1.0`); (2) on the tag push, CI builds the Windows
+  package with config Release and opens a draft release "Replay to Disk 0.1.0"
+  attaching `obs-replay-to-disk-0.1.0-windows-x64.zip` with SHA-256 checksums
+  in the body — the draft stays invisible until published; (3) review the draft
+  and publish it, stating it requires OBS 33.0.1; (4) run `docs/manual-tests.md`
+  on a real machine with a real game and report the NVENC/AMF/HDR results there;
+  fix what fails and re-tag if needed.
   Done for v0.1.0 (handoff WP6) = every acceptance box PASS.
 
 ## Post-checkup fixes on top of v0.1.0: 12 problems, all fixed — rig-verified 2026-11-13

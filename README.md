@@ -13,11 +13,12 @@ This plugin was built with AI assistance.
 
 ## Install
 
-1. Download the release package for OBS 33.0.1.
-2. Copy the `obs-replay-to-disk` folder from the package into `%ProgramData%\obs-studio\plugins\`. You should end up with `%ProgramData%\obs-studio\plugins\obs-replay-to-disk\bin\64bit\obs-replay-to-disk.dll`.
-3. Start OBS. To verify it loaded: Help > Log Files > View Log Files, and look for `[obs-replay-to-disk] plugin loaded successfully (version 0.1.0)` and `[obs-replay-to-disk] avformat 62.12.102`.
+1. Close OBS.
+2. Download `obs-replay-to-disk-<version>-windows-x64.zip` from the [releases page](https://github.com/John-UNOwen/obs-replay-to-disk/releases). Each release carries one such zip, built by GitHub Actions from a version tag, with SHA-256 checksums listed in the release notes.
+3. Unzip, and copy the `obs-replay-to-disk` folder into `%ProgramData%\obs-studio\plugins\` (create the `plugins` folder if it does not exist). You should end up with `%ProgramData%\obs-studio\plugins\obs-replay-to-disk\bin\64bit\obs-replay-to-disk.dll` and `...\obs-replay-to-disk\data\locale\en-US.ini`.
+4. Start OBS. To verify it loaded: Help > Log Files > View Log Files, and look for `[obs-replay-to-disk] plugin loaded successfully (version 0.1.0)` and `[obs-replay-to-disk] avformat 62.12.102`.
 
-To uninstall, remove the `%ProgramData%\obs-studio\plugins\obs-replay-to-disk` folder and restart OBS.
+To uninstall, remove the `%ProgramData%\obs-studio\plugins\obs-replay-to-disk` folder and restart OBS. Your saved clips and recordings are not touched.
 
 ## Controls
 
