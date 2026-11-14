@@ -45,6 +45,10 @@ jobs:
               if [[ ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]]; then
                 config_data[1]='notarize:true'
                 config_data[3]='config:Release'
+              elif [[ ${GITHUB_REF_NAME} == 'main' || ${GITHUB_REF_NAME} == 'master' ]]; then
+                # Main pushes feed the rolling dev draft release (push.yaml
+                # dev-release job), so they build the same config as releases.
+                config_data[3]='config:Release'
               fi
               ;;
             workflow_dispatch)

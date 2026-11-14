@@ -117,3 +117,51 @@ jobs:
             ${{ github.workspace }}/*.deb
             ${{ github.workspace }}/*.ddeb
             ${{ github.workspace }}/*.tar.xz
+
+  dev-release:
+    name: Update Dev Draft Release 🧪
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-24.04
+    needs: build-project
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download Build Artifacts 📥
+        uses: actions/download-artifact@v4
+
+      - name: Prepare Dev Asset 📦
+        run: |
+          : Prepare Dev Asset 📦
+          set -e
+
+          candidate="$(find . -type f -name '*-windows-x64*.zip' | head -n 1)"
+          if [[ -z "${candidate}" ]]; then
+            echo "No windows-x64 zip artifact found." >&2
+            exit 1
+          fi
+          mv "${candidate}" "${GITHUB_WORKSPACE}/obs-replay-to-disk-dev-windows-x64.zip"
+
+          {
+            echo "### Development build"
+            echo
+            echo "Rolling draft built from \`${GITHUB_SHA}\` ($(date -u '+%Y-%m-%d %H:%M UTC')) on \`main\`."
+            echo "Not a release. Real releases come from pushing a version tag (see README)."
+            echo
+            echo "### Checksums"
+            echo
+            sha256sum "${GITHUB_WORKSPACE}/obs-replay-to-disk-dev-windows-x64.zip" \
+              | awk '{print "    obs-replay-to-disk-dev-windows-x64.zip: " $1}'
+          } > "${GITHUB_WORKSPACE}/DEV_RELEASE.md"
+
+      - name: Update Draft Release 🛫
+        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564
+        with:
+          tag_name: dev
+          target_commitish: main
+          name: ${{ needs.build-project.outputs.pluginName }} — dev build
+          draft: true
+          update: true
+          overwrite_files: true
+          body_path: ${{ github.workspace }}/DEV_RELEASE.md
+          files: ${{ github.workspace }}/obs-replay-to-disk-dev-windows-x64.zip

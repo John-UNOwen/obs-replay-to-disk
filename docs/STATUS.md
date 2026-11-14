@@ -1255,3 +1255,29 @@ an option); the bundled DLLs sit in a user-writable folder, a DLL-hijack
 surface shared with every ProgramData-installed plugin (a checksum-at-load
 pass is the recorded mitigation if wanted); README carries the FFmpeg
 redistribution note (obs-deps / ffmpeg.org).
+
+## Rolling dev draft release on main pushes (2026-11-14)
+
+Owner asked whether the missing-zip problem (a `main` push skips
+`Create Release 🛫` — it is tag-gated) can be automated; the original plan
+had deliberately kept push/publish owner-only ("the repo is left fully
+push-ready" — autonomous-run-plan decision). Owner chose: every push to
+`main` updates one rolling draft release, version tags stay the real
+release path.
+
+- `build-project.yaml` check-event: `main`/`master` pushes now build config
+  `Release` (same config as tag builds; semver-tag rule unchanged).
+- `push.yaml` gains `dev-release` (`if: github.ref_name == 'main'`, after
+  `build-project`): downloads the windows artifact, renames its zip to the
+  fixed `obs-replay-to-disk-dev-windows-x64.zip`, and posts through the
+  same pinned `softprops/action-gh-release` action with `tag_name: dev`,
+  `draft: true`, `update: true`, `overwrite_files: true` — one draft,
+  always current, SHA + date + checksum in the body. Drafts are
+  owner-visible only, so nothing publishes itself; publishing stays the
+  owner's click. The `dev` tag is created by `GITHUB_TOKEN`, which cannot
+  re-trigger workflows, so there is no run loop.
+
+Verified: both workflow files parse as YAML; artifact name/glob match the
+existing `windows-build` upload step. Not exercised on a run — first proof
+is the next `main` push (owned by the owner): a draft "Replay to Disk — dev
+build" should appear under Releases → Drafts.
