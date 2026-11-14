@@ -85,6 +85,8 @@ cmake --install build_x64 --prefix release/RelWithDebInfo --config RelWithDebInf
 
 The installed plugin lands in `release/RelWithDebInfo/obs-replay-to-disk/`: the DLL, PDB and bundled FFmpeg DLLs at the folder root (the flat OBS 33 plugin layout), locale files in `data/locale/`.
 
+For the unit tests, configure with `-D ENABLE_TESTS=ON`, build the `test_core`, `test_rename` and `test_ffmpeg_load` targets in the same config, and run `ctest --test-dir build_x64 -C RelWithDebInfo`. CI runs the same three tests on every build.
+
 ## License
 
 GPL-2.0-or-later. The release zip redistributes the FFmpeg shared libraries from OBS's build dependencies ([obs-deps](https://github.com/obsproject/obs-deps), FFmpeg source at [ffmpeg.org](https://ffmpeg.org)), which are LGPL/GPL-licensed; their sources come from the same two places.
