@@ -16,6 +16,11 @@
 
 #include "plugin/settings.h"
 
+/* Canonical libobs handle name (obs-defs.h declares the same typedef; all
+ * users of this header include obs-module.h first, an identical typedef is
+ * fine in C and C++). */
+typedef struct obs_source obs_source_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,6 +58,18 @@ void rr_settings_dialog_install(void);
 void rr_settings_dialog_uninstall(void);
 void rr_status_dock_install(void);
 void rr_status_dock_uninstall(void);
+
+/* Process watcher (src/ui/process-watch.cpp, RR_UI): a 2 s UI-thread timer
+ * implementing the watch_follow / watch_autostart settings. install runs at
+ * module load, uninstall at unload, refresh after rr_plugin_set_settings so
+ * a new foreground is re-followed and the source cache is dropped.
+ * The enumeration walks every scene for window_capture/game_capture sources
+ * (uuid + "Scene/Name" display path) for the dialog picker. All UI thread. */
+void rr_process_watch_install(void);
+void rr_process_watch_uninstall(void);
+void rr_process_watch_refresh(void);
+void rr_process_watch_pin_source(obs_source_t *src, const char *uuid); /* selftest only */
+void rr_process_watch_enum_capture_sources(void (*cb)(void *data, const char *uuid, const char *display), void *data);
 
 #ifdef __cplusplus
 }

@@ -1383,3 +1383,60 @@ Gates green at this commit (both configs build clean /W4-cl, ctest 3/3).
 Edge kept from the design: g_start_cfg snapshots unresolved values; every
 start resolves fresh, so a profile switch autostart reads the new profile's
 output settings.
+
+## Process watcher: process autostart + dynamic capture following (2026-11-14)
+
+Owner asked for the buffer to start when a watched process starts; the
+follow-with-capture idea grew from the canvas question (the engine feeds from
+the program canvas, so dynamic capture = make the canvas show the right app).
+Design A approved: the user picks ONE window_capture/game_capture source, the
+watcher retargets it. Foreground-based, so the second app on the list starting
+in the background never steals the capture (owner's requirement).
+
+Module src/ui/process-watch.cpp (RR_UI, UI-thread QTimer, 2 s tick):
+- Rising edge on the process table (CreateToolhelp32Snapshot, exe base names,
+  ".exe" stripped, case-insensitive) starts the buffer via rr_plugin_start,
+  and only when OFF. The snapshot is tracked even while disabled, so enabling
+  mid-session never fires on already-running apps. Never stops anything.
+- Follow: GetForegroundWindow → ms_get_uwp_actual_window equivalent (child of
+  ApplicationFrameWindow/WinUIDesktopWin32WindowClass with a foreign pid) →
+  exe via QueryFullProcessImageNameW(PROCESS_QUERY_LIMITED_INFORMATION) →
+  match against the list → retarget once per foreground change (g_last_followed).
+  Selector written exactly like the OBS picker (window-helpers.c add_window:
+  title:class:exe, # → #22, : → #3A) plus priority=exe. Non-listed foreground
+  keeps the last target; unresolvable exe (elevated) keeps it too.
+- Source found by obs_source_get_uuid walking obs_frontend_get_scenes (cached
+  ref; scene-walk warning if it vanished). Dialog combo enumerates all capture
+  sources with "Scene/…/Name" paths (recursive prefix walk; no parent-walk:
+  obs_sceneitem_get_parent is not public API).
+Settings: watch_autostart/watch_follow/watch_names/watch_source_id/
+watch_source_name in rr_config + settings.json. Refresh on every dialog apply
+(rr_process_watch_refresh).
+
+Selftest watch mode (RR_SELFTEST=watch): timer schedule t=3 spawn foreground
+app / 12 check autostart+follow / 15 spawn hidden app / 21 check background
+ignored + terminate app / 28 check buffer kept running. The source is a
+standalone window_capture created by the selftest and pinned via
+rr_process_watch_pin_source (no scene touches from the watchdog thread).
+Watch exes: the rig compiles private scratch apps (rr-watch-app GUI +
+rr-watch-hidden sleeper, .testrig/scripts/build-watch-apps.ps1) because the
+second rig run proved System32 names can collide with unrelated processes: an
+external notepad was already running at OBS start, the first tick seeded it
+(edge-only by design), so the spawned notepad produced no rising edge.
+
+Rig proof watch-r3 (2026-11-14), all four checks ok:
+- "rr-watch-app.exe started, starting the buffer" 50 ms after spawn; state=2.
+- "rr_watch_selftest now follows rr-watch-app.exe" + the window-capture
+  source's own "update settings:" line; stored window string
+  "rr watch app:rrwatchapp:rr-watch-app.exe".
+- hidden app spawn logged "started, buffer already running", source unchanged
+  (still the app's selector, hidden exe absent from it), buffer running.
+- after TerminateProcess of the app at t=21, buffer still state=2 at t=28.
+  "selftest finished: ok watch mode".
+UWP note: System32\notepad.exe on this machine is the UWP stub (the follow
+worked through ApplicationFrameWindow anyway; EnumWindows finds only the
+frame, whose pid differs from the content pid, so the selftest now kills its
+own child instead of WM_CLOSE).
+
+Gates green at this commit (both configs build clean /W4-cl, ctest 3/3,
+gersemi+clang-format clean).

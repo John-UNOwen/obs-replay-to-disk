@@ -321,13 +321,191 @@ static int selftest_parse_saves(const char *list)
 	return n;
 }
 
+/* ------------------------------------------------- watch mode (selftest) */
+
+/* Schedule (t = seconds since OBS finished loading, buffer starts via the
+ * watcher, never via rr_engine_start here):
+ *   3 s  spawn the foreground app                       -> rising-edge
+ *        autostart + follow retarget expected
+ *  12 s  check the buffer started; check the pinned capture source now
+ *        points at the foreground app
+ *  15 s  spawn the hidden app (a second listed app that never gets focus)  ->
+ *        must NOT move the source and must NOT touch the running buffer
+ *  21 s  check both held, then terminate the foreground app (a real process
+ *        exit: the watcher must never stop the buffer)
+ *  30 s  check the buffer is still running; cleanup + stop + finish
+ *
+ * The two spawned apps are configurable (RR_SELFTEST_WATCH_APP for the
+ * foreground app, RR_SELFTEST_WATCH_HIDDEN for the windowless one) so the rig
+ * can use private scratch exes no unrelated process on the machine can
+ * collide with; the checks look for their base names.               */
+struct watch_procs {
+	PROCESS_INFORMATION app;    /* the foreground app (spawned at t=3) */
+	PROCESS_INFORMATION hidden; /* the windowless app (spawned at t=15) */
+	obs_source_t *src;          /* own ref, pinned into the watcher */
+	bool ok_autostart;
+	bool ok_follow;
+	bool ok_background;
+	bool ok_kept_running;
+};
+static struct watch_procs g_st_watch;
+
+static const char *env_or(const char *name, const char *def)
+{
+	const char *v = getenv(name);
+	return v && *v ? v : def;
+}
+
+static void lower_copy(char *dst, size_t n, const char *src)
+{
+	snprintf(dst, n, "%s", src);
+	for (char *p = dst; *p; p++) {
+		if (*p >= 'A' && *p <= 'Z')
+			*p = (char)(*p + 32);
+	}
+}
+
+static void base_lower(char *dst, size_t n, const char *path)
+{
+	const char *slash = strrchr(path, '\\');
+	lower_copy(dst, n, slash ? slash + 1 : path);
+}
+
+static void spawn_hidden(const wchar_t *exe, const wchar_t *args, PROCESS_INFORMATION *pi)
+{
+	STARTUPINFOW si = {sizeof(si)};
+	wchar_t line[512];
+	swprintf(line, sizeof(line) / sizeof(line[0]), L"%s %s", exe, args);
+	if (CreateProcessW(exe, line, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, pi))
+		return;
+	obs_log(LOG_WARNING, "selftest: spawn failed (err %lu)", GetLastError());
+}
+
+static void spawn_foreground(const wchar_t *exe, PROCESS_INFORMATION *pi)
+{
+	STARTUPINFOW si = {sizeof(si)};
+	if (CreateProcessW(exe, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, pi))
+		return;
+	obs_log(LOG_WARNING, "selftest: spawn failed (err %lu)", GetLastError());
+}
+
+static const char *watch_src_window_setting(obs_source_t *src)
+{
+	static char buf[2048];
+	obs_data_t *s = obs_source_get_settings(src);
+	const char *window = obs_data_get_string(s, "window");
+	snprintf(buf, sizeof(buf), "%s", window ? window : "");
+	obs_data_release(s);
+	return buf;
+}
+
+static DWORD WINAPI selftest_watch_worker(LPVOID arg)
+{
+	const uint64_t start = os_gettime_ns();
+	const double until = (double)(uintptr_t)arg;
+	bool done[5] = {false, false, false, false, false};
+
+	const char *app_path = env_or("RR_SELFTEST_WATCH_APP", "C:\\Windows\\System32\\notepad.exe");
+	const char *hid_path = env_or("RR_SELFTEST_WATCH_HIDDEN", "C:\\Windows\\System32\\cmd.exe");
+	wchar_t app_w[MAX_PATH], hid_w[MAX_PATH];
+	os_utf8_to_wcs(app_path, 0, app_w, MAX_PATH);
+	os_utf8_to_wcs(hid_path, 0, hid_w, MAX_PATH);
+	char want_app[128], want_hid[128];
+	base_lower(want_app, sizeof(want_app), app_path);
+	base_lower(want_hid, sizeof(want_hid), hid_path);
+
+	for (;;) {
+		const double t = (double)(os_gettime_ns() - start) / 1e9;
+		if (g_st_stop || t >= until)
+			break;
+
+		if (!done[0] && t >= 3.0) {
+			done[0] = true;
+			spawn_foreground(app_w, &g_st_watch.app);
+			obs_log(LOG_INFO, "selftest: %s spawned (foreground app)", want_app);
+		}
+		if (!done[1] && t >= 12.0) {
+			done[1] = true;
+			struct rr_status st;
+			rr_engine_get_status(&st);
+			g_st_watch.ok_autostart = st.state != RR_STATE_OFF;
+			obs_log(LOG_INFO, "selftest: watch check autostart %s (state=%d)",
+				g_st_watch.ok_autostart ? "ok" : "FAIL", st.state);
+
+			char lower[2048];
+			lower_copy(lower, sizeof(lower), watch_src_window_setting(g_st_watch.src));
+			g_st_watch.ok_follow = strstr(lower, want_app) != NULL;
+			obs_log(LOG_INFO, "selftest: watch check follow %s (window='%s')",
+				g_st_watch.ok_follow ? "ok" : "FAIL", lower);
+		}
+		if (!done[2] && t >= 15.0) {
+			done[2] = true;
+			spawn_hidden(hid_w, L"/c ping -n 40 127.0.0.1", &g_st_watch.hidden);
+			obs_log(LOG_INFO, "selftest: %s spawned hidden (background listed app)", want_hid);
+		}
+		if (!done[3] && t >= 21.0) {
+			done[3] = true;
+			char lower[2048];
+			lower_copy(lower, sizeof(lower), watch_src_window_setting(g_st_watch.src));
+			struct rr_status st;
+			rr_engine_get_status(&st);
+			g_st_watch.ok_background = strstr(lower, want_app) != NULL && strstr(lower, want_hid) == NULL &&
+						   st.state != RR_STATE_OFF;
+			obs_log(LOG_INFO, "selftest: watch check background-app-stays-away %s (window='%s')",
+				g_st_watch.ok_background ? "ok" : "FAIL", lower);
+			if (g_st_watch.app.hProcess) {
+				/* a real process exit (the notepad on this machine is UWP-hosted, and only
+				 * the exit matters here: the watcher must never stop the buffer) */
+				TerminateProcess(g_st_watch.app.hProcess, 0);
+				obs_log(LOG_INFO, "selftest: %s terminated (process exit)", want_app);
+			}
+		}
+		if (!done[4] && t >= 28.0) {
+			done[4] = true;
+			struct rr_status st;
+			rr_engine_get_status(&st);
+			g_st_watch.ok_kept_running = st.state != RR_STATE_OFF;
+			obs_log(LOG_INFO, "selftest: watch check kept-running-after-exit %s (state=%d)",
+				g_st_watch.ok_kept_running ? "ok" : "FAIL", st.state);
+		}
+		os_sleep_ms(100);
+	}
+
+	const bool ok = g_st_watch.ok_autostart && g_st_watch.ok_follow && g_st_watch.ok_background &&
+			g_st_watch.ok_kept_running;
+	obs_log(LOG_INFO,
+		"selftest: watch summary autostart=%d follow=%d background-away=%d kept-running-after-exit=%d",
+		g_st_watch.ok_autostart, g_st_watch.ok_follow, g_st_watch.ok_background, g_st_watch.ok_kept_running);
+
+	if (g_st_watch.hidden.hProcess)
+		TerminateProcess(g_st_watch.hidden.hProcess, 0);
+	if (g_st_watch.app.hProcess)
+		TerminateProcess(g_st_watch.app.hProcess, 0);
+
+	rr_process_watch_pin_source(NULL, NULL);
+	if (g_st_watch.src) {
+		obs_source_release(g_st_watch.src);
+		g_st_watch.src = NULL;
+	}
+
+	rr_engine_stop();
+	rr_engine_wait_off(15000);
+	obs_log(LOG_INFO,
+		"selftest finished: %s watch mode (foreground app start+follow, background app ignored, "
+		"start-only honored)",
+		ok ? "ok" : "failed");
+	return 0;
+}
+
 /* Called on the UI thread at FINISHED_LOADING when RR_SELFTEST is set. */
 static void selftest_start(void)
 {
 	const char *mode = getenv("RR_SELFTEST");
 	const bool save_mode = mode && strcmp(mode, "save") == 0;
-	if (!mode || (strcmp(mode, "buffer") != 0 && !save_mode)) {
-		obs_log(LOG_WARNING, "selftest: RR_SELFTEST='%s' is not supported by this build (buffer/save only)",
+	const bool watch_mode = mode && strcmp(mode, "watch") == 0;
+	if (!mode || (strcmp(mode, "buffer") != 0 && !save_mode && !watch_mode)) {
+		obs_log(LOG_WARNING,
+			"selftest: RR_SELFTEST='%s' is not supported by this build (buffer/save/watch only)",
 			mode ? mode : "");
 		return;
 	}
@@ -349,6 +527,44 @@ static void selftest_start(void)
 	snprintf(cfg.output_dir, sizeof(cfg.output_dir), "%s\\out", dir);
 	os_mkdirs(cfg.buffer_dir);
 	os_mkdirs(cfg.output_dir);
+
+	if (watch_mode) {
+#ifdef RR_UI
+		/* The watcher (installed at module load) starts the buffer here; rr_engine_start
+		 * is never called for this mode. Configuration goes into the plugin's live
+		 * settings only (not settings.json) and into a pinned test capture source, so
+		 * the test does not touch the user's scene graph. */
+		const char *names = getenv("RR_SELFTEST_WATCH_NAMES");
+		snprintf(cfg.watch_names, sizeof(cfg.watch_names), "%s",
+			 names && *names ? names : "notepad.exe,cmd.exe");
+		cfg.watch_autostart = true;
+		cfg.watch_follow = true;
+
+		g_st_watch.src = obs_source_create("window_capture", "rr_watch_selftest", NULL, NULL);
+		if (!g_st_watch.src) {
+			obs_log(LOG_INFO, "selftest finished: failed could not create the test capture source");
+			return;
+		}
+		const char *uuid = obs_source_get_uuid(g_st_watch.src);
+		snprintf(cfg.watch_source_id, sizeof(cfg.watch_source_id), "%s", uuid);
+		snprintf(cfg.watch_source_name, sizeof(cfg.watch_source_name), "rr_watch_selftest");
+		rr_process_watch_pin_source(g_st_watch.src, uuid);
+
+		g_settings = cfg; /* the watcher and rr_plugin_start read these */
+
+		selftest_attach_media(media);
+		obs_log(LOG_INFO, "selftest: watch mode window=%ds run=%ds names=%s dir=%s", window, run_sec,
+			cfg.watch_names, dir);
+
+		g_st_thread =
+			CreateThread(NULL, 0, selftest_watch_worker, (LPVOID)(uintptr_t)(unsigned)run_sec, 0, NULL);
+		if (!g_st_thread)
+			obs_log(LOG_INFO, "selftest finished: failed could not create the watchdog thread");
+#else
+		obs_log(LOG_INFO, "selftest finished: failed watch mode needs the UI build");
+#endif
+		return;
+	}
 
 	const char *enc = getenv("RR_SELFTEST_ENCODER");
 	if (enc && *enc)
@@ -511,6 +727,7 @@ bool obs_module_load(void)
 #ifdef RR_UI
 	rr_settings_dialog_install(); /* Tools menu item -> the dialog (WP5) */
 	rr_status_dock_install();     /* "replay_to_disk_dock" (WP5) */
+	rr_process_watch_install();   /* 2 s follow/autostart timer (inert until enabled) */
 #endif
 
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
@@ -520,6 +737,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 #ifdef RR_UI
+	rr_process_watch_uninstall();
 	rr_settings_dialog_uninstall();
 	rr_status_dock_uninstall();
 #endif
@@ -562,6 +780,9 @@ bool rr_plugin_set_settings(const struct rr_config *cfg)
 
 	g_settings = copy;
 	g_start_cfg_valid = false; /* the next start re-resolves the folders from the new settings */
+#ifdef RR_UI
+	rr_process_watch_refresh(); /* the watcher re-reads these settings on its next tick */
+#endif
 	return true;
 }
 

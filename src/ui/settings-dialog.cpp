@@ -22,6 +22,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -57,7 +58,10 @@ static bool config_equal(const struct rr_config &a, const struct rr_config &b)
 	       strcmp(a.filename_format, b.filename_format) == 0 && strcmp(a.video_encoder, b.video_encoder) == 0 &&
 	       a.rate_control == b.rate_control && a.bitrate_kbps == b.bitrate_kbps && a.cq_level == b.cq_level &&
 	       strcmp(a.extra_encoder_settings, b.extra_encoder_settings) == 0 && a.audio_tracks == b.audio_tracks &&
-	       a.audio_bitrate_kbps == b.audio_bitrate_kbps && a.save_sound == b.save_sound;
+	       a.audio_bitrate_kbps == b.audio_bitrate_kbps && a.save_sound == b.save_sound &&
+	       a.watch_autostart == b.watch_autostart && a.watch_follow == b.watch_follow &&
+	       strcmp(a.watch_names, b.watch_names) == 0 && strcmp(a.watch_source_id, b.watch_source_id) == 0 &&
+	       strcmp(a.watch_source_name, b.watch_source_name) == 0;
 }
 
 ReplayToDiskDialog::ReplayToDiskDialog(QWidget *parent) : QDialog(parent)
@@ -200,6 +204,21 @@ void ReplayToDiskDialog::build_ui()
 	form->addRow(m_saveSound);
 
 	root->addLayout(form);
+
+	/* process watcher (2 s UI-thread scan, see src/ui/process-watch.cpp) */
+	auto *watchBox = new QGroupBox(rr_qtext("Watch.Group"), this);
+	auto *watchCol = new QVBoxLayout(watchBox);
+	m_watchAutostart = new QCheckBox(rr_qtext("Watch.Autostart"), watchBox);
+	m_watchFollow = new QCheckBox(rr_qtext("Watch.Follow"), watchBox);
+	watchCol->addWidget(m_watchAutostart);
+	watchCol->addWidget(m_watchFollow);
+	auto *watchForm = new QFormLayout();
+	m_watchNames = new QLineEdit(watchBox);
+	watchForm->addRow(new QLabel(rr_qtext("Watch.Names")), m_watchNames);
+	m_watchSource = new QComboBox(watchBox);
+	watchForm->addRow(new QLabel(rr_qtext("Watch.Source")), m_watchSource);
+	watchCol->addLayout(watchForm);
+	root->addWidget(watchBox);
 
 	auto *buttons =
 		new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, this);
@@ -348,6 +367,52 @@ void ReplayToDiskDialog::update_source_enabled()
 	update_rc_enabled();
 }
 
+/* window_capture/game_capture sources across all scenes, for the follow
+ * picker. Row 0 is "none"; m_watch_srcs stays index-aligned with the combo. */
+static void collect_watch_src(void *data, const char *uuid, const char *display)
+{
+	auto *pairs = static_cast<QVector<QPair<QString, QString>> *>(data);
+	pairs->append(qMakePair(QString::fromUtf8(uuid), QString::fromUtf8(display)));
+}
+
+void ReplayToDiskDialog::populate_watch_sources()
+{
+	m_watch_srcs.clear();
+	m_watch_srcs.append(qMakePair(QString(), QString())); /* row 0 = none */
+
+	QVector<QPair<QString, QString>> found;
+	rr_process_watch_enum_capture_sources(collect_watch_src, &found);
+
+	m_watchSource->blockSignals(true);
+	m_watchSource->clear();
+	m_watchSource->addItem(rr_qtext("Watch.SourceNone"));
+	for (const auto &p : found) {
+		m_watchSource->addItem(p.second);
+		m_watch_srcs.append(p);
+	}
+
+	const QString want = QString::fromUtf8(m_saved.watch_source_id);
+	int idx = -1;
+	for (int i = 1; i < m_watch_srcs.size(); i++) {
+		if (m_watch_srcs[i].first == want) {
+			idx = i;
+			break;
+		}
+	}
+	if (idx < 0 && !want.isEmpty()) {
+		/* configured but no longer in any scene: keep it selectable so
+		 * the dialog never silently drops the choice */
+		QString label = QString::fromUtf8(m_saved.watch_source_name);
+		if (label.isEmpty())
+			label = want;
+		m_watchSource->addItem(label + rr_qtext("Watch.SourceMissing"));
+		m_watch_srcs.append(qMakePair(want, QString::fromUtf8(m_saved.watch_source_name)));
+		idx = m_watch_srcs.size() - 1;
+	}
+	m_watchSource->setCurrentIndex(idx < 0 ? 0 : idx);
+	m_watchSource->blockSignals(false);
+}
+
 void ReplayToDiskDialog::reload()
 {
 	rr_plugin_get_settings(&m_saved);
@@ -377,6 +442,10 @@ void ReplayToDiskDialog::reload()
 	}
 	m_audioBitrate->setValue(m_saved.audio_bitrate_kbps);
 	m_saveSound->setChecked(m_saved.save_sound);
+	m_watchAutostart->setChecked(m_saved.watch_autostart);
+	m_watchFollow->setChecked(m_saved.watch_follow);
+	m_watchNames->setText(QString::fromUtf8(m_saved.watch_names));
+	populate_watch_sources();
 
 	/* empty folder fields show the OBS-recording-path default greyed */
 	char buf[RR_PATHLEN] = "";
@@ -415,6 +484,16 @@ void ReplayToDiskDialog::collect(struct rr_config *cfg) const
 	cfg->audio_tracks = track_mask();
 	cfg->audio_bitrate_kbps = m_audioBitrate->value();
 	cfg->save_sound = m_saveSound->isChecked();
+	cfg->watch_autostart = m_watchAutostart->isChecked();
+	cfg->watch_follow = m_watchFollow->isChecked();
+	const QByteArray names = m_watchNames->text().toUtf8();
+	snprintf(cfg->watch_names, sizeof(cfg->watch_names), "%s", names.constData());
+	const int row = m_watchSource->currentIndex();
+	const bool have_src = row > 0 && row < m_watch_srcs.size();
+	snprintf(cfg->watch_source_id, sizeof(cfg->watch_source_id), "%s",
+		 have_src ? m_watch_srcs[row].first.toUtf8().constData() : "");
+	snprintf(cfg->watch_source_name, sizeof(cfg->watch_source_name), "%s",
+		 have_src ? m_watch_srcs[row].second.toUtf8().constData() : "");
 }
 
 void ReplayToDiskDialog::update_disk_line()

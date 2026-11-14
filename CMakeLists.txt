@@ -56,6 +56,7 @@ if(ENABLE_QT)
   target_sources(
     ${CMAKE_PROJECT_NAME}
     PRIVATE
+      src/ui/process-watch.cpp
       src/ui/settings-dialog.cpp
       src/ui/settings-dialog.hpp
       src/ui/status-dock.cpp

@@ -40,6 +40,11 @@ void rr_settings_default(struct rr_config *cfg)
 	cfg->audio_tracks = 1;
 	cfg->audio_bitrate_kbps = 160;
 	cfg->save_sound = true;
+	cfg->watch_autostart = false;
+	cfg->watch_follow = false;
+	cfg->watch_names[0] = 0;
+	cfg->watch_source_id[0] = 0;
+	cfg->watch_source_name[0] = 0;
 }
 
 static int clamp_int(int v, int lo, int hi)
@@ -154,6 +159,11 @@ void rr_settings_load(struct rr_config *cfg)
 	cfg->audio_tracks = (int)obs_data_get_int(data, "audio_tracks");
 	cfg->audio_bitrate_kbps = (int)obs_data_get_int(data, "audio_bitrate_kbps");
 	cfg->save_sound = obs_data_get_bool(data, "save_sound");
+	cfg->watch_autostart = obs_data_get_bool(data, "watch_autostart");
+	cfg->watch_follow = obs_data_get_bool(data, "watch_follow");
+	json_str(data, "watch_names", cfg->watch_names, sizeof(cfg->watch_names));
+	json_str(data, "watch_source_id", cfg->watch_source_id, sizeof(cfg->watch_source_id));
+	json_str(data, "watch_source_name", cfg->watch_source_name, sizeof(cfg->watch_source_name));
 
 	obs_data_release(data);
 
@@ -200,6 +210,11 @@ bool rr_settings_save(const struct rr_config *cfg)
 	obs_data_set_int(data, "audio_tracks", copy.audio_tracks);
 	obs_data_set_int(data, "audio_bitrate_kbps", copy.audio_bitrate_kbps);
 	obs_data_set_bool(data, "save_sound", copy.save_sound);
+	obs_data_set_bool(data, "watch_autostart", copy.watch_autostart);
+	obs_data_set_bool(data, "watch_follow", copy.watch_follow);
+	obs_data_set_string(data, "watch_names", copy.watch_names);
+	obs_data_set_string(data, "watch_source_id", copy.watch_source_id);
+	obs_data_set_string(data, "watch_source_name", copy.watch_source_name);
 
 	const bool ok = obs_data_save_json_safe(data, path, "tmp", "bak");
 	obs_data_release(data);

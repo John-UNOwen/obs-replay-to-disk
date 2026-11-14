@@ -15,6 +15,9 @@ extern "C" {
 #define RR_ENC_ID_LEN 64
 #define RR_FILENAME_FMT_LEN 256
 #define RR_EXTRA_JSON_LEN 4096
+#define RR_WATCH_NAMES_LEN 1024
+#define RR_WATCH_SOURCE_ID_LEN 64
+#define RR_WATCH_SOURCE_NAME_LEN 256
 
 /* 5.8 default filename format (settings.c default/clamp; engine.c fallback
  * when a configured format generates an unsafe name). */
@@ -50,6 +53,15 @@ struct rr_config {
 	int audio_tracks;                               /* bit mask: bit 0 = track 1 … bit 5 = track 6, ≥ 1 bit */
 	int audio_bitrate_kbps;                         /* 64–320 (clamped) */
 	bool save_sound;
+
+	/* Process watcher (inert unless watch_autostart/watch_follow): both
+	 * features share one 2 s foreground/process scan in src/ui/. The list
+	 * is comma-separated exe names, case-insensitive, ".exe" optional. */
+	bool watch_autostart; /* start the buffer when a listed process first appears */
+	bool watch_follow;    /* retarget watch_source below to the foreground app in the list */
+	char watch_names[RR_WATCH_NAMES_LEN];
+	char watch_source_id[RR_WATCH_SOURCE_ID_LEN];     /* obs_source_get_uuid of the capture source */
+	char watch_source_name[RR_WATCH_SOURCE_NAME_LEN]; /* display: "Scene/Name" */
 };
 
 /* Fill cfg with the 5.8 defaults. */

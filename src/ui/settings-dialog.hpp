@@ -5,6 +5,9 @@
 #pragma once
 
 #include <QDialog>
+#include <QPair>
+#include <QString>
+#include <QVector>
 
 #include "plugin/settings.h"
 
@@ -38,6 +41,7 @@ private:
 	void on_length_changed();
 	void update_rc_enabled();
 	void update_source_enabled();
+	void populate_watch_sources();
 	void collect(struct rr_config *cfg) const;
 	void update_disk_line();
 	bool apply();
@@ -69,6 +73,13 @@ private:
 	QCheckBox *m_tracks[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 	QSpinBox *m_audioBitrate = nullptr;
 	QCheckBox *m_saveSound = nullptr;
+
+	QCheckBox *m_watchAutostart = nullptr;
+	QCheckBox *m_watchFollow = nullptr;
+	QLineEdit *m_watchNames = nullptr;
+	QComboBox *m_watchSource = nullptr;
+	/* combo rows, index-aligned with m_watchSource (row 0 = none): uuid, display */
+	QVector<QPair<QString, QString>> m_watch_srcs;
 
 	QTimer *m_timer = nullptr;
 	int m_bufferSeconds = 1800;

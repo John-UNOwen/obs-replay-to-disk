@@ -47,10 +47,21 @@ Everything is set in the dialog. The values are stored in `settings.json` in OBS
 | Audio tracks | track 1 | any of tracks 1 to 6, at least one |
 | Audio bitrate | 160 kbps | 64 to 320, per track (AAC) |
 | Save sound | on | system beep when a save finishes |
+| Watch: start the buffer | off | start the buffer when a listed exe first appears (see Process watcher below the table) |
+| Watch: follow with a capture source | off | point a window or game capture source at the foreground app from the list |
+| Process names | empty | watched exe names, comma separated, e.g. `eldenring.exe, Discord`; `.exe` optional, case-insensitive |
+| Follow this capture source | none | the window/game capture source the watcher retargets |
 
 With constant quality, the disk-space estimate in the dialog assumes about 50 Mbps.
 
 Settings source (the radio row at the top of the dialog) is one of Manual, OBS streaming settings, or OBS recording settings. With an OBS source, the video encoder, rate control, bitrate/quality, extra encoder settings, audio tracks and audio bitrate come from OBS's own Output settings, re-read every time the buffer starts, and those dialog rows gray out; everything else always comes from the plugin. Mapping: OBS's bitrate-based rate controls (CBR, VBR, QVBR, …) become CBR at OBS's bitrate, CRF/CQP/ICQ become constant quality at OBS's level; simple-mode recording qualities Small/HQ become quality level 23/16; recording set to "same as stream" follows the streaming settings; Lossless recording is not supported (a warning is logged and the encoder is picked automatically). OBS's simple-mode x264 options box holds a raw options string, not JSON, so it is not inherited. Changing OBS's output settings while the buffer runs takes effect at the next buffer start.
+
+The process watcher is one 2-second scan that runs while OBS is open, with two independent toggles that share the process name list:
+
+- Start the buffer when a listed process starts fires when an exe from the list first appears while OBS runs and the buffer is off. It only ever starts: when the app exits the buffer keeps running, and if you stop the buffer while the app runs it stays stopped until that process starts again. An app that was already running when OBS started is not treated as a start.
+- Point the capture source at whichever listed app is in the foreground needs one window capture or game capture source in your scenes, picked once in the Follow this capture source dropdown. When an app from the list owns the foreground window, the watcher writes that exact window into the source, the same string the source's own window picker writes, with Match priority set to Process so a changing title does not lose the window. Only the foreground moves the source: a listed app that starts in the background never steals the capture, and switching away to Discord or the desktop keeps the last followed app. Alt-tabbing to another listed app moves the source, and moving back moves it back. You can still edit the source by hand; the next switch to a listed app overwrites the pick again.
+
+Two things to know when following: a game started as administrator cannot be followed from a normal OBS (OBS itself shows it as "unknown" too), and an exclusive-fullscreen game needs a game capture source, window capture cannot see it. Retargeting changes your scene, so a running stream or recording shows the switch too.
 
 ## Side effects
 
