@@ -1725,3 +1725,43 @@ VBitrate 6000, ABitrate 160, RecQuality Stream, RecTracks 1, Track1Bitrate
 160, no encoder json, no service.json); watch exes stay under
 %TEMP%\dsh-scratch\Disk-Replay-Buffer\watchapps (built by
 `.testrig/scripts/build-watch-apps.ps1`); nothing committed, nothing pushed.
+
+## Output gating (owner policy 2026-11-17, shipped after 0.3.0)
+
+Policy: the buffer never starts while an OBS recording is running, and while
+the buffer runs OBS's three control-panel Start buttons (streamButton,
+recordButton, replayBufferButton) are disabled — each stays enabled while its
+own output is active, so Stop remains clickable (Start and Stop are the same
+button). Hotkeys and the tray menu bypass the gating (documented).
+
+Implementation:
+- `src/ui/outputs-gate.cpp` (new): a 1 s UI-thread QTimer re-applies the
+  enabled states from `rr_engine_get_status` + `obs_frontend_*_active`
+  (OBS also rewrites the flags itself, so edge-only updates get stomped);
+  steady state off = hands the buttons back to OBS. Widget pointers via
+  `findChild` on `obs_frontend_get_main_window()`; uninstall re-enables and
+  drops them.
+- `plugin-main.c`: `recording_blocks_start()` guard at the two start entries
+  (`rr_plugin_start`, `start_from_settings`), logging `engine: start refused,
+  OBS is recording` and flashing the reason in the dock
+  (`rr_status_dock_flash`, new in status-dock, an 8 s extra line);
+  `Start.RecordingBlocked` locale string.
+- Selftest `RR_SELFTEST=gate` (reuses the watch watchdog/UI-task machinery):
+  OBS recording up, refused start, recording down, buffer up, buttons probed
+  disabled through `rr_outputs_gate_debug_enabled`, buffer stop, buttons
+  probed re-enabled.
+
+Rig proof (`gate-r2`, evidence.log archived in the run dir, OBS 33.0.1 rig):
+`gate check obs-recording ok`, `engine: start refused, OBS is recording`,
+`gate check refused-while-recording ok (state=0)`, `gate check buffer-started
+ok (state=2)`, `gate check buttons-disabled ok (found=1 stream=0 record=0
+replay=0)`, `gate check buttons-re-enabled ok (found=1 stream=1 record=1
+replay=1 state=0)`, `gate summary obs-recording=1 refused-while-recording=1
+buffer-started=1 buttons-disabled=1 buttons-re-enabled=1`, `selftest
+finished: ok gate mode`. First launch of the run failed with LoadLibrary 126:
+a Debug-config build had been deployed, whose Qt6Cored/ucrtbased imports the
+rig tree does not carry — the rig runs Release DLLs.
+
+Rig state after the run: profile baseline untouched, OBS recording landed in
+the profile's recording folder (Videos, outside the run dir) as OBS's own
+file; selftest buffer/out under `gate-r2` were purged on stop.

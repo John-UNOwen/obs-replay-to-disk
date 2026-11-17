@@ -8,6 +8,7 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 
+#include <QDateTime>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -69,12 +70,26 @@ void ReplayToDiskDock::on_start_stop()
 	refresh();
 }
 
+void ReplayToDiskDock::flash(const QString &msg)
+{
+	m_flash = msg;
+	m_flash_until = QDateTime::currentMSecsSinceEpoch() + 8000;
+	refresh();
+}
+
 void ReplayToDiskDock::refresh()
 {
 	struct rr_status st;
 	rr_engine_get_status(&st);
 
-	m_status->setText(rr_status_lines(st).join('\n'));
+	QStringList lines = rr_status_lines(st);
+	if (!m_flash.isEmpty()) {
+		if (QDateTime::currentMSecsSinceEpoch() >= m_flash_until)
+			m_flash.clear();
+		else
+			lines.prepend(m_flash);
+	}
+	m_status->setText(lines.join('\n'));
 
 	const bool off = (st.state == RR_STATE_OFF);
 	m_startStop->setText(off ? rr_qtext("Button.Start") : rr_qtext("Button.Stop"));
@@ -106,4 +121,10 @@ extern "C" void rr_status_dock_uninstall(void)
 	 * global) while this module is still loaded. */
 	obs_frontend_remove_dock("replay_to_disk_dock");
 	g_dock_content = nullptr;
+}
+
+extern "C" void rr_status_dock_flash(const char *msg)
+{
+	if (g_dock_content)
+		static_cast<ReplayToDiskDock *>(g_dock_content)->flash(QString::fromUtf8(msg ? msg : ""));
 }

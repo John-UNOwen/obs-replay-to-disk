@@ -71,6 +71,16 @@ void rr_process_watch_refresh(void);
 void rr_process_watch_pin_source(obs_source_t *src, const char *uuid); /* selftest only */
 void rr_process_watch_enum_capture_sources(void (*cb)(void *data, const char *uuid, const char *display), void *data);
 
+/* Output gating (src/ui/outputs-gate.cpp, RR_UI): while the buffer runs, OBS's
+ * stream/record/replay buttons stay disabled unless that output is running.
+ * install/uninstall run at module load/unload, the probe is selftest only. */
+void rr_outputs_gate_install(void);
+void rr_outputs_gate_uninstall(void);
+bool rr_outputs_gate_debug_enabled(bool *stream, bool *record, bool *replay);
+
+/* Show msg as an extra line in the status dock for 8 s (UI thread). */
+void rr_status_dock_flash(const char *msg);
+
 #ifdef __cplusplus
 }
 #endif

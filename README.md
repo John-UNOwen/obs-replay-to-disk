@@ -25,6 +25,7 @@ To uninstall, remove the `%ProgramData%\obs-studio\plugins\obs-replay-to-disk` f
 - Two hotkeys in Settings > Hotkeys: "Replay to Disk: Save" and "Replay to Disk: Start/Stop Buffer". Bindings are saved per OBS profile.
 - The full settings dialog at Tools > Replay to Disk. It has Start Buffer / Save Replay / Stop Buffer buttons and a status line showing state, buffered time, disk use, last saved file and last error.
 - An optional dock with the same status line and buttons: Docks > Replay to Disk.
+- The buffer and OBS's own recording do not overlap: while an OBS recording runs, the buffer refuses to start and the dock shows why. While the buffer runs, OBS's Start Streaming / Start Recording / Start Replay Buffer buttons are grayed, so outputs cannot stack up by accident. A button stays live when its output is already running (for example a stream started before the buffer), so you can always Stop it. OBS hotkeys and the tray menu bypass this: recording or streaming started by hotkey still runs alongside the buffer.
 
 ## Settings
 

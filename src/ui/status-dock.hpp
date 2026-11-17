@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <QString>
 #include <QWidget>
 
 class QLabel;
@@ -19,6 +20,8 @@ public:
 	ReplayToDiskDock();
 	~ReplayToDiskDock() override;
 
+	void flash(const QString &msg);
+
 private:
 	void refresh();
 	void on_start_stop();
@@ -27,6 +30,8 @@ private:
 	QPushButton *m_startStop = nullptr;
 	QPushButton *m_save = nullptr;
 	QTimer *m_timer = nullptr;
+	QString m_flash;
+	qint64 m_flash_until = 0;
 };
 
 extern "C" {
@@ -34,4 +39,7 @@ extern "C" {
 /* obs_frontend_add_dock_by_id / remove at module load/unload. UI thread. */
 void rr_status_dock_install(void);
 void rr_status_dock_uninstall(void);
+
+/* Show msg as an extra dock line for 8 s (UI thread). */
+void rr_status_dock_flash(const char *msg);
 }

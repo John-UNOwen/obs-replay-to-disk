@@ -178,8 +178,26 @@ static void resolve_dirs(struct rr_config *cfg)
 	snprintf(cfg->output_dir, sizeof(cfg->output_dir), "%s", out);
 }
 
+/* --------------------------------------------- start gate (owner 2026-11-15) */
+
+/* The buffer never starts while OBS is recording: both write video files with
+ * the same encoder. The refusal says where it is visible (the status dock),
+ * not only in the log. UI thread. */
+static bool recording_blocks_start(void)
+{
+	if (!obs_frontend_recording_active())
+		return false;
+	obs_log(LOG_WARNING, "engine: start refused, OBS is recording");
+#ifdef RR_UI
+	rr_status_dock_flash(obs_module_text("Start.RecordingBlocked"));
+#endif
+	return true;
+}
+
 static void start_from_settings(void)
 {
+	if (recording_blocks_start())
+		return;
 	struct rr_config cfg;
 	if (g_start_cfg_valid) {
 		cfg = g_start_cfg;
@@ -445,8 +463,9 @@ static void spawn_foreground(const wchar_t *exe, PROCESS_INFORMATION *pi)
 /* ------------------------------------------------------ watchdog ↔ UI handoff
  *
  * The watchdog thread must not call libobs or touch the watcher: both are
- * UI-thread state. The two source operations the schedule needs — reading
- * the pinned source's "window" setting and the final unpin + release — run as
+ * UI-thread state. The operations the watch and gate schedules need — reading
+ * the pinned source's "window" setting, the final unpin + release, driving
+ * OBS's own recording, and probing the OBS buttons — run as
  * obs_queue_task(OBS_TASK_UI, ...) tasks (OBSApp's ui_task_handler queues
  * them onto the Qt event loop, frontend/OBSApp.cpp), which is exactly where
  * the 2 s QTimer already mutates the same source (obs-data.c has no lock, so
@@ -464,12 +483,22 @@ static void spawn_foreground(const wchar_t *exe, PROCESS_INFORMATION *pi)
 #define RR_WATCH_REQ_RELEASE 2 /* restore the live settings, then unpin + release the pinned test source */
 #define RR_WATCH_REQ_KILL 3   /* release the test source's strong ref, keeping the watcher pin */
 #define RR_WATCH_REQ_READD 4  /* re-create the test source and pin it back under the uuid */
+#define RR_GATE_REQ_REC_ON 5  /* obs_frontend_start_recording */
+#define RR_GATE_REQ_REC_OFF 6 /* obs_frontend_stop_recording */
+#define RR_GATE_REQ_REC_STATE \
+	7 /* obs_frontend_recording_active into g_gate_rec_active */
+#define RR_GATE_REQ_TRY_START 8 /* rr_plugin_start, the refusal case and the allowed case */
+#define RR_GATE_REQ_PROBE 9    /* the three OBS buttons' enabled states into g_gate_probe */
+#define RR_GATE_REQ_RESTORE 10 /* put the pre-test settings back */
 /* Manual reset, created at selftest_start and never closed: a task the worker
  * abandoned can still SetEvent, and closing a handle a queued task holds
  * risks hitting a recycled one; process teardown reclaims it. */
 static HANDLE g_watch_evt;
 static volatile LONG g_watch_req;
 static char g_watch_window[2048]; /* UI task writes, worker reads only after the event */
+static bool g_gate_rec_active;    /* gate selftest: recording_active result, UI task writes */
+static bool g_gate_probe[3];      /* gate selftest: stream/record/replay button enabled states */
+static bool g_gate_probe_ok;      /* gate selftest: the probe found all three OBS widgets */
 
 /* Release the pinned test source's strong ref and the watcher pin. UI thread
  * only and idempotent (NULL-guarded): the queued task, the frontend-event
@@ -501,6 +530,17 @@ static void restore_watch_settings_ui(void)
 	g_settings_saved_valid = false;
 	obs_log(LOG_INFO, "selftest: watch live settings restored");
 	rr_process_watch_refresh(); /* re-reads the restored (inert) settings: follow state, cache and baseline */
+}
+
+/* Gate mode has no watcher injection to undo, only the live settings (folder
+ * paths) the run swapped in. UI thread, like g_settings itself. */
+static void restore_gate_settings_ui(void)
+{
+	if (!g_settings_saved_valid)
+		return;
+	g_settings = g_settings_saved;
+	g_settings_saved_valid = false;
+	obs_log(LOG_INFO, "selftest: gate live settings restored");
 }
 
 static void watch_ui_task(void *param) /* runs on the UI thread */
@@ -537,6 +577,28 @@ static void watch_ui_task(void *param) /* runs on the UI thread */
 			else
 				obs_log(LOG_WARNING, "selftest: watch follow-retry: could not re-create the source");
 		}
+		break;
+	case RR_GATE_REQ_REC_ON:
+		obs_frontend_recording_start();
+		break;
+	case RR_GATE_REQ_REC_OFF:
+		obs_frontend_recording_stop();
+		break;
+	case RR_GATE_REQ_REC_STATE:
+		g_gate_rec_active = obs_frontend_recording_active();
+		break;
+	case RR_GATE_REQ_TRY_START:
+		rr_plugin_start();
+		break;
+	case RR_GATE_REQ_PROBE:
+#ifdef RR_UI
+		g_gate_probe_ok = rr_outputs_gate_debug_enabled(&g_gate_probe[0], &g_gate_probe[1], &g_gate_probe[2]);
+#else
+		g_gate_probe_ok = false;
+#endif
+		break;
+	case RR_GATE_REQ_RESTORE:
+		restore_gate_settings_ui();
 		break;
 	default: /* RR_WATCH_REQ_WINDOW */
 		g_watch_window[0] = 0;
@@ -729,15 +791,130 @@ static DWORD WINAPI selftest_watch_worker(LPVOID arg)
 	return 0;
 }
 
+/* RR_SELFTEST=gate schedule (t = seconds since OBS finished loading):
+ *   3 s  start an OBS recording
+ *   7 s  confirm the recording is active
+ *   8 s  rr_plugin_start must refuse (state stays OFF while recording)
+ *  11 s  stop the OBS recording
+ *  14 s  rr_plugin_start must start the buffer
+ *  17 s  buffer buffering, and all three OBS buttons disabled
+ *  19 s  stop the buffer
+ *  22 s  buffer off, and all three OBS buttons enabled again
+ * The run is meaningless if OBS cannot start a recording (bad recording
+ * path), and the logs show which check lost its footing. */
+static DWORD WINAPI selftest_gate_worker(LPVOID arg)
+{
+	const uint64_t start = os_gettime_ns();
+	const double until = (double)(uintptr_t)arg;
+	bool done[8] = {false, false, false, false, false, false, false, false};
+	bool ok_rec_start = false, ok_refused = false, ok_buf = false, ok_buttons_off = false, ok_buttons_on = false;
+
+	for (;;) {
+		const double t = (double)(os_gettime_ns() - start) / 1e9;
+		if (g_st_stop || t >= until)
+			break;
+
+		if (!done[0] && t >= 3.0) {
+			done[0] = true;
+			if (!watch_run_ui_task(RR_GATE_REQ_REC_ON, 5000))
+				break;
+			obs_log(LOG_INFO, "selftest: gate OBS recording start requested");
+		}
+		if (!done[1] && t >= 7.0) {
+			done[1] = true;
+			if (!watch_run_ui_task(RR_GATE_REQ_REC_STATE, 5000))
+				break;
+			ok_rec_start = g_gate_rec_active;
+			obs_log(LOG_INFO, "selftest: gate check obs-recording %s", ok_rec_start ? "ok" : "FAIL");
+		}
+		if (!done[2] && t >= 8.0) {
+			done[2] = true;
+			if (!watch_run_ui_task(RR_GATE_REQ_TRY_START, 5000))
+				break;
+		}
+		if (!done[3] && t >= 9.5) {
+			done[3] = true;
+			struct rr_status st;
+			rr_engine_get_status(&st);
+			ok_refused = ok_rec_start && st.state == RR_STATE_OFF;
+			obs_log(LOG_INFO, "selftest: gate check refused-while-recording %s (state=%d)",
+				ok_refused ? "ok" : "FAIL", st.state);
+		}
+		if (!done[4] && t >= 11.0) {
+			done[4] = true;
+			if (!watch_run_ui_task(RR_GATE_REQ_REC_OFF, 5000))
+				break;
+			obs_log(LOG_INFO, "selftest: gate OBS recording stop requested");
+		}
+		if (!done[5] && t >= 14.0) {
+			done[5] = true;
+			if (!watch_run_ui_task(RR_GATE_REQ_TRY_START, 5000))
+				break;
+		}
+		if (!done[6] && t >= 17.0) {
+			done[6] = true;
+			struct rr_status st;
+			rr_engine_get_status(&st);
+			ok_buf = st.state != RR_STATE_OFF;
+			obs_log(LOG_INFO, "selftest: gate check buffer-started %s (state=%d)", ok_buf ? "ok" : "FAIL",
+				st.state);
+			if (!watch_run_ui_task(RR_GATE_REQ_PROBE, 5000))
+				break;
+			ok_buttons_off = g_gate_probe_ok && !g_gate_probe[0] && !g_gate_probe[1] && !g_gate_probe[2];
+			obs_log(LOG_INFO,
+				"selftest: gate check buttons-disabled %s (found=%d stream=%d record=%d replay=%d)",
+				ok_buttons_off ? "ok" : "FAIL", g_gate_probe_ok, g_gate_probe[0], g_gate_probe[1],
+				g_gate_probe[2]);
+			rr_plugin_stop();
+		}
+		if (!done[7] && t >= 20.0) {
+			done[7] = true;
+			rr_engine_wait_off(15000);
+			struct rr_status st;
+			rr_engine_get_status(&st);
+			/* Let one 1 s gate poll run: it re-enables the buttons once the
+			 * engine reads OFF. */
+			os_sleep_ms(1500);
+			if (!watch_run_ui_task(RR_GATE_REQ_PROBE, 5000))
+				break;
+			ok_buttons_on = g_gate_probe_ok && g_gate_probe[0] && g_gate_probe[1] && g_gate_probe[2] &&
+					st.state == RR_STATE_OFF;
+			obs_log(LOG_INFO,
+				"selftest: gate check buttons-re-enabled %s (found=%d stream=%d record=%d replay=%d state=%d)",
+				ok_buttons_on ? "ok" : "FAIL", g_gate_probe_ok, g_gate_probe[0], g_gate_probe[1],
+				g_gate_probe[2], st.state);
+		}
+		os_sleep_ms(100);
+	}
+
+	const bool ok = ok_rec_start && ok_refused && ok_buf && ok_buttons_off && ok_buttons_on;
+	obs_log(LOG_INFO,
+		"selftest: gate summary obs-recording=%d refused-while-recording=%d buffer-started=%d "
+		"buttons-disabled=%d buttons-re-enabled=%d",
+		ok_rec_start, ok_refused, ok_buf, ok_buttons_off, ok_buttons_on);
+
+	if (!watch_run_ui_task(RR_GATE_REQ_RESTORE, 8000))
+		obs_log(LOG_WARNING, "selftest: gate settings restore not confirmed (OBS exiting?)");
+
+	rr_engine_stop();
+	rr_engine_wait_off(15000);
+	obs_log(LOG_INFO,
+		"selftest finished: %s gate mode (start refused while OBS records, OBS buttons gated while "
+		"buffer runs)",
+		ok ? "ok" : "failed");
+	return 0;
+}
+
 /* Called on the UI thread at FINISHED_LOADING when RR_SELFTEST is set. */
 static void selftest_start(void)
 {
 	const char *mode = getenv("RR_SELFTEST");
 	const bool save_mode = mode && strcmp(mode, "save") == 0;
 	const bool watch_mode = mode && strcmp(mode, "watch") == 0;
-	if (!mode || (strcmp(mode, "buffer") != 0 && !save_mode && !watch_mode)) {
+	const bool gate_mode = mode && strcmp(mode, "gate") == 0;
+	if (!mode || (strcmp(mode, "buffer") != 0 && !save_mode && !watch_mode && !gate_mode)) {
 		obs_log(LOG_WARNING,
-			"selftest: RR_SELFTEST='%s' is not supported by this build (buffer/save/watch only)",
+			"selftest: RR_SELFTEST='%s' is not supported by this build (buffer/save/watch/gate only)",
 			mode ? mode : "");
 		return;
 	}
@@ -812,6 +989,39 @@ static void selftest_start(void)
 		}
 #else
 		obs_log(LOG_INFO, "selftest finished: failed watch mode needs the UI build");
+#endif
+		return;
+	}
+
+	if (gate_mode) {
+#ifdef RR_UI
+		/* The run drives OBS's own recording and the plugin's start path through
+		 * rr_plugin_start (the guard lives there), so the live settings carry the
+		 * selftest folders; the run-end RESTORE task puts the user's copy back. */
+		g_settings_saved = g_settings;
+		g_settings_saved_valid = true;
+		g_settings = cfg;
+
+		selftest_attach_media(media);
+		obs_log(LOG_INFO, "selftest: gate mode window=%ds run=%ds dir=%s media=%s", window, run_sec, dir,
+			media ? media : "(none)");
+
+		if (!g_watch_evt)
+			g_watch_evt = CreateEventW(NULL, TRUE, FALSE, NULL); /* watch_ui_task signals it */
+		if (!g_watch_evt) {
+			obs_log(LOG_INFO, "selftest finished: failed could not create the UI handoff event");
+			restore_gate_settings_ui(); /* UI thread here, and no watchdog runs */
+			return;
+		}
+
+		g_st_thread =
+			CreateThread(NULL, 0, selftest_gate_worker, (LPVOID)(uintptr_t)(unsigned)run_sec, 0, NULL);
+		if (!g_st_thread) {
+			obs_log(LOG_INFO, "selftest finished: failed could not create the watchdog thread");
+			restore_gate_settings_ui();
+		}
+#else
+		obs_log(LOG_INFO, "selftest finished: failed gate mode needs the UI build");
 #endif
 		return;
 	}
@@ -993,6 +1203,7 @@ bool obs_module_load(void)
 	rr_settings_dialog_install(); /* Tools menu item -> the dialog (WP5) */
 	rr_status_dock_install();     /* "replay_to_disk_dock" (WP5) */
 	rr_process_watch_install();   /* 2 s follow/autostart timer (inert until enabled) */
+	rr_outputs_gate_install();    /* disables OBS stream/record/replay buttons while the buffer runs */
 #endif
 
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
@@ -1009,6 +1220,7 @@ void obs_module_unload(void)
 	rr_process_watch_uninstall();
 	rr_settings_dialog_uninstall();
 	rr_status_dock_uninstall();
+	rr_outputs_gate_uninstall(); /* re-enables the OBS buttons it may have disabled */
 #endif
 
 	obs_frontend_remove_event_callback(on_frontend_event, NULL);
@@ -1083,6 +1295,8 @@ void rr_plugin_effective_dirs(const struct rr_config *cfg, char *buffer_dir, siz
 
 void rr_plugin_start(void)
 {
+	if (recording_blocks_start())
+		return;
 	/* Current settings snapshot, folders resolved here on the UI thread. */
 	struct rr_config cfg = g_settings;
 	char buf[RR_PATHLEN], out[RR_PATHLEN];
